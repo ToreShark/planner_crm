@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+dist/
+
+# Environment (НИКОГДА не пушить!)
+.env
+.env.local
+.env.production
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Build
+build/

@@ -1,0 +1,1217 @@
+// ============================================================
+// Telegram Bot Service
+// Интерфейс планировщика через Telegram
+//
+// Пошаговые диалоги для планирования дня/недели/месяца
+// ============================================================
+
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Telegraf, Markup, Context } from 'telegraf';
+import { InlineKeyboardButton } from 'telegraf/typings/core/types/typegram';
+import { ClaudePlannerService } from '../planner/claude-planner.service';
+import { DailyPlanOutput, TaskItem, TaskCategory, TaskStatus, TaskPriority } from '../planner/types';
+
+// Emoji маппинг
+const CATEGORY_EMOJI: Record<string, string> = {
+  work: '💼',
+  tech: '🤖',
+  marketing: '📈',
+  health: '💪',
+  personal: '🧠',
+};
+
+const PRIORITY_EMOJI: Record<string, string> = {
+  critical: '🔴',
+  high: '🟠',
+  medium: '🟡',
+  low: '⚪',
+};
+
+const STATUS_EMOJI: Record<string, string> = {
+  pending: '⬜',
+  in_progress: '🔵',
+  done: '✅',
+  deferred: '➡️',
+  cancelled: '❌',
+};
+
+// -------------------------------------------------------
+// Состояние пошагового диалога
+// -------------------------------------------------------
+
+type WizardType = 'day' | 'week' | 'month' | null;
+
+interface WizardState {
+  type: WizardType;
+  step: number;
+  data: Record<string, any>;
+}
+
+@Injectable()
+export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
+  private readonly logger = new Logger(TelegramBotService.name);
+  private bot: Telegraf;
+  private readonly allowedUserId: number;
+
+  private currentPlan: DailyPlanOutput | null = null;
+  private wizard: WizardState = { type: null, step: 0, data: {} };
+
+  constructor(
+    private readonly configService: ConfigService,
+    private readonly plannerService: ClaudePlannerService,
+  ) {
+    const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
+    if (!token) throw new Error('TELEGRAM_BOT_TOKEN not set');
+
+    this.bot = new Telegraf(token);
+    this.allowedUserId = Number(
+      this.configService.get<string>('TELEGRAM_OWNER_ID'),
+    );
+  }
+
+  async onModuleInit() {
+    this.setupMiddleware();
+    this.setupCommands();
+    this.setupCallbacks();
+    this.setupTextHandler();
+
+    await this.bot.launch();
+    this.logger.log('Telegram bot started');
+  }
+
+  async onModuleDestroy() {
+    this.bot.stop('App shutdown');
+  }
+
+  // -------------------------------------------------------
+  // Middleware
+  // -------------------------------------------------------
+
+  private setupMiddleware() {
+    this.bot.use(async (ctx, next) => {
+      if (ctx.from?.id !== this.allowedUserId) {
+        await ctx.reply('⛔ Бот работает только для владельца.');
+        return;
+      }
+      return next();
+    });
+  }
+
+  // -------------------------------------------------------
+  // Команды
+  // -------------------------------------------------------
+
+  private setupCommands() {
+    this.bot.start(async (ctx) => {
+      this.resetWizard();
+      await ctx.reply(
+        '🗓 *AI Планировщик PrimeLegal*\n\n' +
+          '*Планирование (пошагово):*\n' +
+          '/plan — План на сегодня\n' +
+          '/week — План на неделю\n' +
+          '/month — План на месяц\n\n' +
+          '*Управление:*\n' +
+          '/status — Текущий прогресс\n' +
+          '/replan — Перепланировать день\n' +
+          '/review — Итоги дня\n' +
+          '/cancel — Отменить текущий диалог\n\n' +
+          '💬 Просто напиши задачу — добавлю в план.',
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    // /cancel — сброс диалога
+    this.bot.command('cancel', async (ctx) => {
+      this.resetWizard();
+      await ctx.reply('❌ Диалог отменён.');
+    });
+
+    // ==========================================
+    // /plan — ПОШАГОВЫЙ ПЛАН ДНЯ
+    // ==========================================
+    this.bot.command('plan', async (ctx) => {
+      this.wizard = {
+        type: 'day',
+        step: 1,
+        data: {},
+      };
+      await ctx.reply(
+        '🗓 *Планируем день*\n\n' +
+          '📍 *Шаг 1/5 — Где ты сегодня?*\n\n' +
+          'Выбери или напиши:',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [
+              Markup.button.callback('🏢 Офис', 'day_place:офис'),
+              Markup.button.callback('🏠 Дом', 'day_place:дом'),
+              Markup.button.callback('🚗 В дороге', 'day_place:в дороге'),
+            ],
+          ]),
+        },
+      );
+    });
+
+    // ==========================================
+    // /week — ПОШАГОВЫЙ ПЛАН НЕДЕЛИ
+    // ==========================================
+    this.bot.command('week', async (ctx) => {
+      this.wizard = {
+        type: 'week',
+        step: 1,
+        data: {},
+      };
+      await ctx.reply(
+        '📅 *Планируем неделю*\n\n' +
+          '🎯 *Шаг 1/4 — Главный фокус недели*\n\n' +
+          'Какой один результат ты хочешь получить к концу недели?\n\n' +
+          '_Примеры:_\n' +
+          '• Закрыть кассацию Темирбаева\n' +
+          '• Запустить набор на курс\n' +
+          '• Сдать возражение по НСД',
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    // ==========================================
+    // /month — ПОШАГОВЫЙ ПЛАН МЕСЯЦА
+    // ==========================================
+    this.bot.command('month', async (ctx) => {
+      const currentMonth = new Date().toLocaleString('ru-RU', { month: 'long' });
+      const nextMonth = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+        .toLocaleString('ru-RU', { month: 'long' });
+
+      this.wizard = {
+        type: 'month',
+        step: 1,
+        data: {},
+      };
+      await ctx.reply(
+        '📆 *Планируем месяц*\n\n' +
+          '📅 *Шаг 1/5 — На какой месяц планируем?*',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [
+              Markup.button.callback(
+                `${currentMonth.charAt(0).toUpperCase() + currentMonth.slice(1)}`,
+                `month_name:${currentMonth}`,
+              ),
+              Markup.button.callback(
+                `${nextMonth.charAt(0).toUpperCase() + nextMonth.slice(1)}`,
+                `month_name:${nextMonth}`,
+              ),
+            ],
+          ]),
+        },
+      );
+    });
+
+    // /status
+    this.bot.command('status', async (ctx) => {
+      if (!this.currentPlan) {
+        await ctx.reply('Плана нет. Используй /plan');
+        return;
+      }
+      await this.sendPlanStatus(ctx);
+    });
+
+    // /replan
+    this.bot.command('replan', async (ctx) => {
+      const reason = ctx.message.text.replace('/replan', '').trim();
+      if (!reason) {
+        this.wizard = { type: null, step: 0, data: { awaitingReplan: true } };
+        await ctx.reply(
+          '🔄 *Перепланирование*\n\n' +
+            'Что изменилось? Напиши причину:\n\n' +
+            '_Примеры:_\n' +
+            '• Суд перенесли на завтра\n' +
+            '• Срочный звонок от клиента\n' +
+            '• Плохо себя чувствую',
+          { parse_mode: 'Markdown' },
+        );
+        return;
+      }
+      await this.replanDay(ctx, reason);
+    });
+
+    // /review
+    this.bot.command('review', async (ctx) => {
+      if (!this.currentPlan) {
+        await ctx.reply('Нет плана для обзора.');
+        return;
+      }
+      await this.sendDayReview(ctx);
+    });
+  }
+
+  // -------------------------------------------------------
+  // Callbacks (кнопки)
+  // -------------------------------------------------------
+
+  private setupCallbacks() {
+    // === WIZARD: День ===
+
+    // Шаг 1 — место
+    this.bot.action(/^day_place:(.+)$/, async (ctx) => {
+      await ctx.answerCbQuery();
+      this.wizard.data.place = ctx.match[1];
+      this.wizard.step = 2;
+      await ctx.reply(
+        `📍 Место: *${this.wizard.data.place}*\n\n` +
+          '⚡ *Шаг 2/5 — Уровень энергии*\n\n' +
+          'Как ты себя чувствуешь? (0 = никакой, 10 = огонь)',
+        {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard([
+            [
+              Markup.button.callback('😴 1-3', 'day_energy:3'),
+              Markup.button.callback('😐 4-5', 'day_energy:5'),
+              Markup.button.callback('💪 6-7', 'day_energy:7'),
+              Markup.button.callback('🔥 8-10', 'day_energy:9'),
+            ],
+          ]),
+        },
+      );
+    });
+
+    // Шаг 2 — энергия
+    this.bot.action(/^day_energy:(\d+)$/, async (ctx) => {
+      await ctx.answerCbQuery();
+      this.wizard.data.energyLevel = Number(ctx.match[1]);
+      this.wizard.step = 3;
+
+      const energyComment = this.wizard.data.energyLevel <= 4
+        ? '🔋 Понял, сделаем лёгкий план.'
+        : this.wizard.data.energyLevel >= 8
+          ? '🔥 Отлично! Можно нагрузить.'
+          : '👍 Нормально, стандартный план.';
+
+      await ctx.reply(
+        `⚡ Энергия: *${this.wizard.data.energyLevel}/10* ${energyComment}\n\n` +
+          '📝 *Шаг 3/5 — Что обязательно сделать сегодня?*\n\n' +
+          'Напиши 1-3 главные задачи (каждая с новой строки):\n\n' +
+          '_Примеры:_\n' +
+          '• Составить отзыв по делу УГД\n' +
+          '• Позвонить Анаре по разделу имущества\n' +
+          '• Бассейн вечером',
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    // === WIZARD: Месяц ===
+
+    // Шаг 1 — название месяца
+    this.bot.action(/^month_name:(.+)$/, async (ctx) => {
+      await ctx.answerCbQuery();
+      this.wizard.data.monthName = ctx.match[1];
+      this.wizard.step = 2;
+      await ctx.reply(
+        `📅 Месяц: *${this.wizard.data.monthName}*\n\n` +
+          '🎯 *Шаг 2/5 — Главная цель месяца*\n\n' +
+          'Один ключевой результат, ради которого всё остальное.\n\n' +
+          '_Примеры:_\n' +
+          '• Запустить набор на курс по банкротству\n' +
+          '• Закрыть 3 дела в стадии исполнения\n' +
+          '• Выйти на стабильный поток клиентов через таргет',
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    // === Задачи — inline кнопки ===
+
+    this.bot.action(/^done:(.+)$/, async (ctx) => {
+      const taskId = ctx.match[1];
+      this.updateTaskStatus(taskId, TaskStatus.DONE);
+      await ctx.answerCbQuery('✅ Выполнено!');
+      await this.refreshPlanMessage(ctx);
+    });
+
+    this.bot.action(/^defer:(.+)$/, async (ctx) => {
+      const taskId = ctx.match[1];
+      this.updateTaskStatus(taskId, TaskStatus.DEFERRED);
+      await ctx.answerCbQuery('➡️ Перенесено');
+      await this.refreshPlanMessage(ctx);
+    });
+
+    this.bot.action(/^progress:(.+)$/, async (ctx) => {
+      const taskId = ctx.match[1];
+      this.updateTaskStatus(taskId, TaskStatus.IN_PROGRESS);
+      await ctx.answerCbQuery('🔵 В работе');
+      await this.refreshPlanMessage(ctx);
+    });
+
+    this.bot.action(/^cancel:(.+)$/, async (ctx) => {
+      const taskId = ctx.match[1];
+      this.updateTaskStatus(taskId, TaskStatus.CANCELLED);
+      await ctx.answerCbQuery('❌ Отменено');
+      await this.refreshPlanMessage(ctx);
+    });
+
+    this.bot.action(/^detail:(.+)$/, async (ctx) => {
+      const taskId = ctx.match[1];
+      const task = this.currentPlan?.tasks.find((t) => t.id === taskId);
+      if (!task) {
+        await ctx.answerCbQuery('Задача не найдена');
+        return;
+      }
+      await ctx.answerCbQuery();
+      await ctx.reply(this.formatTaskDetail(task), {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(this.getTaskActions(task)),
+      });
+    });
+
+    this.bot.action('replan_day', async (ctx) => {
+      await ctx.answerCbQuery();
+      this.wizard.data.awaitingReplan = true;
+      await ctx.reply('📝 Напиши причину перепланирования:');
+    });
+
+    this.bot.action('show_progress', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.sendPlanStatus(ctx);
+    });
+
+    // День: Шаг 5 — тренировка
+    this.bot.action(/^day_train:(.+)$/, async (ctx) => {
+      await ctx.answerCbQuery();
+      const training = ctx.match[1];
+      await this.generateDayFromWizard(ctx, training);
+    });
+
+    // Пропуск шага (кнопка "Пропустить")
+    this.bot.action('skip_step', async (ctx) => {
+      await ctx.answerCbQuery();
+      await this.handleWizardText(ctx, '');
+    });
+  }
+
+  // -------------------------------------------------------
+  // Текстовый ввод — роутер по состоянию wizard
+  // -------------------------------------------------------
+
+  private setupTextHandler() {
+    this.bot.on('text', async (ctx) => {
+      const text = ctx.message.text;
+      if (text.startsWith('/')) return;
+
+      // Если ждём причину перепланирования
+      if (this.wizard.data.awaitingReplan) {
+        this.wizard.data.awaitingReplan = false;
+        await this.replanDay(ctx, text);
+        return;
+      }
+
+      // Если wizard активен — обрабатываем шаг
+      if (this.wizard.type) {
+        await this.handleWizardText(ctx, text);
+        return;
+      }
+
+      // Иначе — добавляем как задачу
+      await this.addTaskFromText(ctx, text);
+    });
+  }
+
+  // -------------------------------------------------------
+  // WIZARD — обработка текстовых шагов
+  // -------------------------------------------------------
+
+  private async handleWizardText(ctx: Context, text: string) {
+    const w = this.wizard;
+
+    // ==========================================
+    // ДЕНЬ
+    // ==========================================
+    if (w.type === 'day') {
+      switch (w.step) {
+        case 2: // Место (если ввёл текстом)
+          w.data.place = text;
+          w.step = 3;
+          await ctx.reply(
+            '⚡ *Шаг 2/5 — Уровень энергии* (0-10)\n\nНапиши число или нажми:',
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [
+                  Markup.button.callback('😴 1-3', 'day_energy:3'),
+                  Markup.button.callback('😐 4-5', 'day_energy:5'),
+                  Markup.button.callback('💪 6-7', 'day_energy:7'),
+                  Markup.button.callback('🔥 8-10', 'day_energy:9'),
+                ],
+              ]),
+            },
+          );
+          break;
+
+        case 3: // Главные задачи
+          w.data.mainTasks = text.split('\n').map((s) => s.replace(/^[-•]\s*/, '').trim()).filter(Boolean);
+          w.step = 4;
+          await ctx.reply(
+            `✅ Записал ${w.data.mainTasks.length} задач(и).\n\n` +
+              '📋 *Шаг 4/5 — Что ещё на уме?*\n\n' +
+              'Допзадачи, мелочи, звонки, напоминания.\n' +
+              'Или нажми "Пропустить" если всё.',
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('⏭ Пропустить', 'skip_step')],
+              ]),
+            },
+          );
+          break;
+
+        case 4: // Допзадачи
+          if (text) {
+            w.data.extraNotes = text.split('\n').map((s) => s.replace(/^[-•]\s*/, '').trim()).filter(Boolean);
+          }
+          w.step = 5;
+          await ctx.reply(
+            '💪 *Шаг 5/5 — Тренировка сегодня?*',
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [
+                  Markup.button.callback('🏊 Бассейн', 'day_train:бассейн'),
+                  Markup.button.callback('🏋️ Силовая', 'day_train:силовая'),
+                  Markup.button.callback('🚫 Нет', 'day_train:нет'),
+                ],
+              ]),
+            },
+          );
+          break;
+      }
+      return;
+    }
+
+    // ==========================================
+    // НЕДЕЛЯ
+    // ==========================================
+    if (w.type === 'week') {
+      switch (w.step) {
+        case 1: // Фокус недели
+          w.data.mainFocus = text;
+          w.step = 2;
+          await ctx.reply(
+            `🎯 Фокус: *${text}*\n\n` +
+              '💼 *Шаг 2/4 — Какие дела/задачи по работе на этой неделе?*\n\n' +
+              'Напиши всё что приходит в голову — суды, дедлайны, звонки, документы:\n\n' +
+              '_Каждая задача с новой строки_',
+            { parse_mode: 'Markdown' },
+          );
+          break;
+
+        case 2: // Рабочие задачи
+          w.data.workTasks = text.split('\n').map((s) => s.replace(/^[-•]\s*/, '').trim()).filter(Boolean);
+          w.step = 3;
+          await ctx.reply(
+            `✅ Записал ${w.data.workTasks.length} рабочих задач.\n\n` +
+              '🤖📈💪 *Шаг 3/4 — Другие направления*\n\n' +
+              'Что ещё хочешь сделать на этой неделе?\n' +
+              'IT, маркетинг, контент, тренировки, личное.\n\n' +
+              '_Или нажми "Пропустить"_',
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('⏭ Пропустить', 'skip_step')],
+              ]),
+            },
+          );
+          break;
+
+        case 3: // Другие задачи
+          if (text) {
+            w.data.otherTasks = text.split('\n').map((s) => s.replace(/^[-•]\s*/, '').trim()).filter(Boolean);
+          }
+          w.step = 4;
+          await ctx.reply(
+            '⚠️ *Шаг 4/4 — Риски и ограничения*\n\n' +
+              'Что может помешать на этой неделе?\n\n' +
+              '_Примеры:_\n' +
+              '• Могут перенести заседание\n' +
+              '• Жду решение суда — может прийти в любой день\n\n' +
+              '_Или нажми "Пропустить"_',
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('⏭ Сгенерировать план', 'skip_step')],
+              ]),
+            },
+          );
+          break;
+
+        case 4: // Риски → Генерация
+          if (text) {
+            w.data.risks = text.split('\n').map((s) => s.replace(/^[-•]\s*/, '').trim()).filter(Boolean);
+          }
+          await this.generateWeekFromWizard(ctx);
+          break;
+      }
+      return;
+    }
+
+    // ==========================================
+    // МЕСЯЦ
+    // ==========================================
+    if (w.type === 'month') {
+      switch (w.step) {
+        case 1: // Название месяца (текстом)
+          w.data.monthName = text;
+          w.step = 2;
+          await ctx.reply(
+            `📅 Месяц: *${text}*\n\n` +
+              '🎯 *Шаг 2/5 — Главная цель месяца*\n\n' +
+              'Один ключевой результат:',
+            { parse_mode: 'Markdown' },
+          );
+          break;
+
+        case 2: // Главная цель
+          w.data.mainGoal = text;
+          w.step = 3;
+          await ctx.reply(
+            `🎯 Цель: *${text}*\n\n` +
+              '💼 *Шаг 3/5 — Юридические дела и задачи*\n\n' +
+              'Какие дела и задачи по работе на этот месяц?\n' +
+              'Суды, кассации, новые клиенты, дедлайны.\n\n' +
+              '_Каждая с новой строки:_',
+            { parse_mode: 'Markdown' },
+          );
+          break;
+
+        case 3: // Рабочие задачи
+          w.data.workTasks = text.split('\n').map((s) => s.replace(/^[-•]\s*/, '').trim()).filter(Boolean);
+          w.step = 4;
+          await ctx.reply(
+            `✅ Записал ${w.data.workTasks.length} задач по работе.\n\n` +
+              '🤖📈💪🧠 *Шаг 4/5 — Другие направления*\n\n' +
+              'Что ещё планируешь в этом месяце?\n' +
+              'IT-проекты, маркетинг, курсы, тренировки, личное.\n\n' +
+              '_Или "Пропустить"_',
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('⏭ Пропустить', 'skip_step')],
+              ]),
+            },
+          );
+          break;
+
+        case 4: // Другие направления
+          if (text) {
+            w.data.otherTasks = text.split('\n').map((s) => s.replace(/^[-•]\s*/, '').trim()).filter(Boolean);
+          }
+          w.step = 5;
+          await ctx.reply(
+            '⚠️ *Шаг 5/5 — Риски и что может помешать*\n\n' +
+              '_Примеры:_\n' +
+              '• Загрузка по срочным делам\n' +
+              '• Выгорание от попытки делать всё\n\n' +
+              '_Или "Сгенерировать план"_',
+            {
+              parse_mode: 'Markdown',
+              ...Markup.inlineKeyboard([
+                [Markup.button.callback('⏭ Сгенерировать план', 'skip_step')],
+              ]),
+            },
+          );
+          break;
+
+        case 5: // Риски → Генерация
+          if (text) {
+            w.data.risks = text.split('\n').map((s) => s.replace(/^[-•]\s*/, '').trim()).filter(Boolean);
+          }
+          await this.generateMonthFromWizard(ctx);
+          break;
+      }
+      return;
+    }
+  }
+
+  // -------------------------------------------------------
+  // Wizard: Тренировка (callback для дня)
+  // -------------------------------------------------------
+
+  private setupDayTrainCallback() {
+    // Уже обрабатывается в setupCallbacks через общий action handler
+  }
+
+  // -------------------------------------------------------
+  // Генерация из wizard-данных
+  // -------------------------------------------------------
+
+  private async generateDayFromWizard(ctx: Context, training?: string) {
+    const w = this.wizard.data;
+
+    const quickNotes: string[] = [
+      ...(w.mainTasks || []),
+      ...(w.extraNotes || []),
+    ];
+
+    if (training && training !== 'нет') {
+      quickNotes.push(`Тренировка: ${training}`);
+    }
+
+    await ctx.reply('🔄 Генерирую план дня на основе твоих ответов...');
+    this.resetWizard();
+
+    try {
+      this.currentPlan = await this.plannerService.generateDailyPlan({
+        quickNotes,
+        energyLevel: w.energyLevel,
+        place: w.place,
+      });
+      await this.sendDailyPlan(ctx);
+    } catch (error) {
+      this.logger.error('Day plan generation failed', error);
+      await ctx.reply('❌ Ошибка генерации. Попробуй /plan заново.');
+    }
+  }
+
+  private async generateWeekFromWizard(ctx: Context) {
+    const w = this.wizard.data;
+
+    const allNotes: string[] = [
+      ...(w.workTasks || []),
+      ...(w.otherTasks || []),
+      ...(w.risks || []).map((r: string) => `Риск: ${r}`),
+    ];
+
+    await ctx.reply('🔄 Генерирую план недели...');
+    this.resetWizard();
+
+    try {
+      const plan = await this.plannerService.generateWeeklyPlan({
+        mainFocus: w.mainFocus,
+        quickNotes: allNotes,
+      });
+      await this.sendWeeklyPlan(ctx, plan);
+    } catch (error) {
+      this.logger.error('Week plan generation failed', error);
+      await ctx.reply('❌ Ошибка генерации. Попробуй /week заново.');
+    }
+  }
+
+  private async generateMonthFromWizard(ctx: Context) {
+    const w = this.wizard.data;
+
+    const allNotes = [
+      ...(w.workTasks || []),
+      ...(w.otherTasks || []),
+      ...(w.risks || []).map((r: string) => `Риск: ${r}`),
+    ];
+
+    // Добавляем заметки в context через quickNotes
+    await ctx.reply(`🔄 Генерирую план на *${w.monthName}*...`, { parse_mode: 'Markdown' });
+    this.resetWizard();
+
+    try {
+      const plan = await this.plannerService.generateMonthlyPlan({
+        monthName: w.monthName,
+        mainGoal: `${w.mainGoal}. Задачи: ${allNotes.join('; ')}`,
+      });
+      await this.sendMonthlyPlan(ctx, plan, w.monthName);
+    } catch (error) {
+      this.logger.error('Month plan generation failed', error);
+      await ctx.reply('❌ Ошибка генерации. Попробуй /month заново.');
+    }
+  }
+
+  private resetWizard() {
+    this.wizard = { type: null, step: 0, data: {} };
+  }
+
+  // -------------------------------------------------------
+  // Генерация и отправка плана
+  // -------------------------------------------------------
+
+  async generateAndSendPlan(ctx: Context, options?: {
+    quickNotes?: string[];
+    energyLevel?: number;
+  }) {
+    await ctx.reply('🔄 Генерирую план дня...');
+    try {
+      this.currentPlan = await this.plannerService.generateDailyPlan({
+        quickNotes: options?.quickNotes,
+        energyLevel: options?.energyLevel,
+      });
+      await this.sendDailyPlan(ctx);
+    } catch (error) {
+      this.logger.error('Plan generation failed', error);
+      await ctx.reply('❌ Ошибка генерации плана.');
+    }
+  }
+
+  async sendMorningPlan() {
+    try {
+      this.currentPlan = await this.plannerService.generateDailyPlan();
+      const message = this.formatDailyPlan(this.currentPlan);
+      const keyboard = this.getPlanKeyboard(this.currentPlan);
+      await this.bot.telegram.sendMessage(this.allowedUserId, message, {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard(keyboard),
+      });
+      this.logger.log('Morning plan sent');
+    } catch (error) {
+      this.logger.error('Morning plan failed', error);
+      await this.bot.telegram.sendMessage(
+        this.allowedUserId,
+        '❌ Не удалось сгенерировать утренний план. Используй /plan.',
+      );
+    }
+  }
+
+  async sendEveningReview() {
+    if (!this.currentPlan) return;
+    try {
+      const review = await this.plannerService.generateDayReview(this.currentPlan);
+      const message =
+        `🌙 *Итоги дня*\n\n` +
+        `🔥 *Главная победа:* ${review.mainWin}\n\n` +
+        `📊 Выполнено: ${review.completedCount}/${review.totalCount}\n` +
+        (review.deferred.length > 0 ? `➡️ Перенесено: ${review.deferred.join(', ')}\n` : '') +
+        `\n💬 ${review.comment}\n\n` +
+        `📋 *На завтра:*\n` +
+        review.suggestionsForTomorrow.map((s) => `• ${s}`).join('\n');
+      await this.bot.telegram.sendMessage(this.allowedUserId, message, { parse_mode: 'Markdown' });
+    } catch (error) {
+      this.logger.error('Evening review failed', error);
+    }
+  }
+
+  // -------------------------------------------------------
+  // Форматирование
+  // -------------------------------------------------------
+
+  private async sendDailyPlan(ctx: Context) {
+    if (!this.currentPlan) return;
+    const message = this.formatDailyPlan(this.currentPlan);
+    const keyboard = this.getPlanKeyboard(this.currentPlan);
+    await ctx.reply(message, {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(keyboard),
+    });
+  }
+
+  private formatDailyPlan(plan: DailyPlanOutput): string {
+    const lines: string[] = [];
+    lines.push(`🗓 *План на ${plan.date}*\n`);
+    lines.push(`🎯 *Фокус:* ${plan.focusOfDay}\n`);
+
+    if (plan.intentions) {
+      lines.push('*Намерения:*');
+      lines.push(`1️⃣ ${plan.intentions.main}`);
+      if (plan.intentions.secondary) lines.push(`2️⃣ ${plan.intentions.secondary}`);
+      if (plan.intentions.recovery) lines.push(`3️⃣ ${plan.intentions.recovery}`);
+      lines.push('');
+    }
+
+    if (plan.timeBlocks && plan.timeBlocks.length > 0) {
+      lines.push('*Расписание:*');
+      for (const block of plan.timeBlocks) {
+        const emoji = CATEGORY_EMOJI[block.category] || '📌';
+        lines.push(`\`${block.startTime}–${block.endTime}\` ${emoji} ${block.label}`);
+      }
+      lines.push('');
+    }
+
+    lines.push('*Задачи:*');
+    for (const task of plan.tasks) {
+      const status = STATUS_EMOJI[task.status] || '⬜';
+      const priority = PRIORITY_EMOJI[task.priority] || '';
+      const time = task.suggestedTime ? ` \`${task.suggestedTime}\`` : '';
+      lines.push(`${status} ${priority} ${task.title}${time}`);
+    }
+
+    if (plan.risks && plan.risks.length > 0) {
+      lines.push('\n⚠️ *Риски:*');
+      for (const risk of plan.risks) {
+        lines.push(`• ${risk.risk}\n  → ${risk.mitigation}`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
+  private getPlanKeyboard(plan: DailyPlanOutput): InlineKeyboardButton[][] {
+    const rows: InlineKeyboardButton[][] = [];
+    const activeTasks = plan.tasks.filter(
+      (t) => t.status === TaskStatus.PENDING || t.status === TaskStatus.IN_PROGRESS,
+    );
+
+    for (const task of activeTasks.slice(0, 8)) {
+      const shortTitle = task.title.length > 25 ? task.title.slice(0, 22) + '...' : task.title;
+      rows.push([
+        Markup.button.callback(`✅ ${shortTitle}`, `done:${task.id}`),
+        Markup.button.callback('➡️', `defer:${task.id}`),
+        Markup.button.callback('📋', `detail:${task.id}`),
+      ]);
+    }
+
+    rows.push([
+      Markup.button.callback('📊 Прогресс', 'show_progress'),
+      Markup.button.callback('🔄 Перепланировать', 'replan_day'),
+    ]);
+
+    return rows;
+  }
+
+  private formatTaskDetail(task: TaskItem): string {
+    const lines: string[] = [];
+    const catEmoji = CATEGORY_EMOJI[task.category] || '📌';
+    const prioEmoji = PRIORITY_EMOJI[task.priority] || '';
+    const statusEmoji = STATUS_EMOJI[task.status] || '';
+
+    lines.push(`${catEmoji} *${task.title}*\n`);
+    if (task.description) lines.push(`${task.description}\n`);
+    lines.push(`Статус: ${statusEmoji} ${task.status}`);
+    lines.push(`Приоритет: ${prioEmoji} ${task.priority}`);
+    lines.push(`Категория: ${task.category}`);
+    if (task.estimatedMinutes) lines.push(`⏱ ${task.estimatedMinutes} мин`);
+    if (task.suggestedTime) lines.push(`🕐 ${task.suggestedTime}`);
+    if (task.linkedCaseId) lines.push(`📁 Дело: ${task.linkedCaseId}`);
+    return lines.join('\n');
+  }
+
+  private getTaskActions(task: TaskItem): InlineKeyboardButton[][] {
+    const rows: InlineKeyboardButton[][] = [];
+    if (task.status !== TaskStatus.DONE) {
+      rows.push([
+        Markup.button.callback('✅ Выполнено', `done:${task.id}`),
+        Markup.button.callback('🔵 В работе', `progress:${task.id}`),
+      ]);
+    }
+    rows.push([
+      Markup.button.callback('➡️ Перенести', `defer:${task.id}`),
+      Markup.button.callback('❌ Отменить', `cancel:${task.id}`),
+    ]);
+    return rows;
+  }
+
+  // -------------------------------------------------------
+  // Прогресс
+  // -------------------------------------------------------
+
+  private async sendPlanStatus(ctx: Context) {
+    if (!this.currentPlan) return;
+    const tasks = this.currentPlan.tasks;
+    const done = tasks.filter((t) => t.status === TaskStatus.DONE).length;
+    const inProgress = tasks.filter((t) => t.status === TaskStatus.IN_PROGRESS).length;
+    const pending = tasks.filter((t) => t.status === TaskStatus.PENDING).length;
+    const deferred = tasks.filter((t) => t.status === TaskStatus.DEFERRED).length;
+    const total = tasks.length;
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+    const lines: string[] = [];
+    lines.push(`📊 *Прогресс дня*\n`);
+    lines.push(`${this.progressBar(pct)} ${pct}%\n`);
+    lines.push(`✅ Выполнено: ${done}`);
+    lines.push(`🔵 В работе: ${inProgress}`);
+    lines.push(`⬜ Ожидает: ${pending}`);
+    if (deferred > 0) lines.push(`➡️ Перенесено: ${deferred}`);
+    lines.push(`\n📋 Всего: ${total}`);
+
+    const remaining = tasks.filter(
+      (t) => t.status === TaskStatus.PENDING || t.status === TaskStatus.IN_PROGRESS,
+    );
+    if (remaining.length > 0) {
+      lines.push('\n*Осталось:*');
+      for (const t of remaining) {
+        lines.push(`${STATUS_EMOJI[t.status]} ${t.title}`);
+      }
+    }
+
+    await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+  }
+
+  private progressBar(pct: number): string {
+    const filled = Math.round(pct / 10);
+    return '▓'.repeat(filled) + '░'.repeat(10 - filled);
+  }
+
+  // -------------------------------------------------------
+  // Перепланирование
+  // -------------------------------------------------------
+
+  private async replanDay(ctx: Context, reason: string) {
+    if (!this.currentPlan) {
+      await ctx.reply('Нет текущего плана. Сначала /plan');
+      return;
+    }
+    await ctx.reply(`🔄 Перепланирую...\n_Причина: ${reason}_`, { parse_mode: 'Markdown' });
+    try {
+      this.currentPlan = await this.plannerService.replan(this.currentPlan, reason);
+      await this.sendDailyPlan(ctx);
+    } catch (error) {
+      this.logger.error('Replan failed', error);
+      await ctx.reply('❌ Ошибка перепланирования.');
+    }
+  }
+
+  // -------------------------------------------------------
+  // Добавление задачи текстом
+  // -------------------------------------------------------
+
+  private async addTaskFromText(ctx: Context, text: string) {
+    if (!this.currentPlan) {
+      await this.generateAndSendPlan(ctx, { quickNotes: [text] });
+      return;
+    }
+
+    const timeMatch = text.match(/(\d{1,2}[:.]\d{2})/);
+    const suggestedTime = timeMatch ? timeMatch[1].replace('.', ':') : undefined;
+    const category = this.detectCategory(text);
+
+    const newTask: TaskItem = {
+      id: `manual_${Date.now()}`,
+      title: text.replace(/(\d{1,2}[:.]\d{2})/, '').trim(),
+      category,
+      priority: TaskPriority.MEDIUM,
+      status: TaskStatus.PENDING,
+      suggestedTime,
+    };
+
+    this.currentPlan.tasks.push(newTask);
+
+    await ctx.reply(
+      `➕ Добавлено: ${CATEGORY_EMOJI[category]} *${newTask.title}*` +
+        (suggestedTime ? `\n🕐 ${suggestedTime}` : ''),
+      {
+        parse_mode: 'Markdown',
+        ...Markup.inlineKeyboard([
+          [
+            Markup.button.callback('✅', `done:${newTask.id}`),
+            Markup.button.callback('➡️', `defer:${newTask.id}`),
+            Markup.button.callback('📋', `detail:${newTask.id}`),
+          ],
+        ]),
+      },
+    );
+  }
+
+  private detectCategory(text: string): TaskCategory {
+    const lower = text.toLowerCase();
+    if (/суд|дело|клиент|иск|жалоб|отзыв|кассац|банкротств|консультац/.test(lower)) return TaskCategory.WORK;
+    if (/код|бот|crm|кабинет|сервер|баг/.test(lower)) return TaskCategory.TECH;
+    if (/реклам|таргет|рилс|контент|youtube|съёмк|сторис|курс/.test(lower)) return TaskCategory.MARKETING;
+    if (/трениров|бассейн|зал|бег|плаван/.test(lower)) return TaskCategory.HEALTH;
+    return TaskCategory.PERSONAL;
+  }
+
+  // -------------------------------------------------------
+  // Итоги дня
+  // -------------------------------------------------------
+
+  private async sendDayReview(ctx: Context) {
+    if (!this.currentPlan) return;
+    await ctx.reply('🔄 Подвожу итоги...');
+    try {
+      const review = await this.plannerService.generateDayReview(this.currentPlan);
+      const message =
+        `🌙 *Итоги дня*\n\n` +
+        `🔥 *Главная победа:* ${review.mainWin}\n\n` +
+        `📊 Выполнено: ${review.completedCount}/${review.totalCount}\n` +
+        (review.deferred.length > 0 ? `➡️ Перенесено: ${review.deferred.join(', ')}\n` : '') +
+        `\n💬 _${review.comment}_\n\n` +
+        `📋 *Рекомендации на завтра:*\n` +
+        review.suggestionsForTomorrow.map((s) => `• ${s}`).join('\n');
+      await ctx.reply(message, { parse_mode: 'Markdown' });
+    } catch (error) {
+      this.logger.error('Day review failed', error);
+      await ctx.reply('❌ Ошибка при подведении итогов.');
+    }
+  }
+
+  // -------------------------------------------------------
+  // Обновление статусов
+  // -------------------------------------------------------
+
+  private updateTaskStatus(taskId: string, status: TaskStatus) {
+    if (!this.currentPlan) return;
+    const task = this.currentPlan.tasks.find((t) => t.id === taskId);
+    if (task) task.status = status;
+  }
+
+  private async refreshPlanMessage(ctx: Context) {
+    if (!this.currentPlan) return;
+    const tasks = this.currentPlan.tasks;
+    const done = tasks.filter((t) => t.status === TaskStatus.DONE).length;
+    const total = tasks.length;
+    const pct = Math.round((done / total) * 100);
+    await ctx.reply(`${this.progressBar(pct)} ${pct}% (${done}/${total})`);
+  }
+
+  // -------------------------------------------------------
+  // Отправка плана недели
+  // -------------------------------------------------------
+
+  private async sendWeeklyPlan(ctx: Context, plan: any) {
+    const lines: string[] = [];
+    lines.push(`📅 *План недели*\n`);
+    lines.push(`🎯 *Фокус:* ${plan.mainFocus || plan.weekFocus || '—'}\n`);
+
+    if (plan.strategicIntentions && Array.isArray(plan.strategicIntentions)) {
+      lines.push('*Стратегические намерения:*');
+      plan.strategicIntentions.forEach((s: string, i: number) => lines.push(`${i + 1}) ${s}`));
+      lines.push('');
+    }
+
+    const checkpoints = plan.checkpoints || plan.dailyPlans || plan.days;
+    if (checkpoints) {
+      lines.push('*По дням:*');
+      if (typeof checkpoints === 'object' && !Array.isArray(checkpoints)) {
+        for (const [day, val] of Object.entries(checkpoints)) {
+          if (typeof val === 'string') {
+            lines.push(`*${day}* — ${val}`);
+          } else {
+            const v = val as any;
+            const focus = v.focus || v.focusOfDay || '';
+            lines.push(`*${day}* — ${focus}`);
+            if (Array.isArray(v.tasks)) {
+              for (const t of v.tasks.slice(0, 3)) {
+                const title = typeof t === 'string' ? t : t.title || '';
+                lines.push(`  • ${title}`);
+              }
+            }
+          }
+        }
+      } else if (Array.isArray(checkpoints)) {
+        for (const cp of checkpoints) {
+          const label = cp.day || cp.date || cp.label || '';
+          const focus = cp.focus || cp.focusOfDay || '';
+          lines.push(`*${label}* — ${focus}`);
+        }
+      }
+    }
+
+    if (plan.risks && Array.isArray(plan.risks)) {
+      lines.push('\n⚠️ *Риски:*');
+      for (const r of plan.risks) {
+        const text = typeof r === 'string' ? r : r.risk || '';
+        const mit = typeof r === 'string' ? '' : r.mitigation || '';
+        lines.push(`• ${text}${mit ? `\n  → ${mit}` : ''}`);
+      }
+    }
+
+    await this.sendLongMessage(ctx, lines.join('\n'));
+  }
+
+  // -------------------------------------------------------
+  // Отправка плана месяца
+  // -------------------------------------------------------
+
+  private async sendMonthlyPlan(ctx: Context, plan: any, fallbackName?: string) {
+    const lines: string[] = [];
+    const name = plan.monthName || fallbackName || 'Текущий месяц';
+    const goal = plan.mainGoal || plan.mainFocus || plan.goal || '—';
+
+    lines.push(`📆 *План месяца — ${name}*\n`);
+    lines.push(`🎯 *Главная цель:* ${goal}\n`);
+
+    // Направления
+    const directions = plan.directions || plan.tasksByCategory || plan.categories;
+    if (directions && typeof directions === 'object') {
+      const catLabels: Record<string, string> = {
+        work: '💼 Работа / Prime Legal',
+        tech: '🤖 Проекты / Автоматизация',
+        marketing: '📈 Маркетинг / Продукты',
+        health: '💪 Здоровье / Режим',
+        personal: '🧠 Личное / Развитие',
+      };
+
+      for (const [cat, tasks] of Object.entries(directions)) {
+        const label = catLabels[cat] || cat;
+        const taskList = Array.isArray(tasks) ? tasks : [];
+        if (taskList.length > 0) {
+          lines.push(`\n*${label}*`);
+          for (const task of taskList) {
+            const s = typeof task === 'string' ? task : (task as any).title || JSON.stringify(task);
+            lines.push(`• ${s}`);
+          }
+        }
+      }
+      lines.push('');
+    }
+
+    // Контрольные точки
+    const checkpoints = plan.weeklyCheckpoints || plan.checkpoints || plan.weeks;
+    if (checkpoints) {
+      lines.push('📋 *Контрольные точки по неделям:*');
+      if (Array.isArray(checkpoints)) {
+        for (const cp of checkpoints) {
+          const weekLabel = cp.week || cp.name || cp.label || 'Неделя';
+          const focus = cp.focus || cp.mainFocus || cp.goal || '';
+          lines.push(`\n*${weekLabel}*${focus ? ` — ${focus}` : ''}`);
+          const tasks = cp.tasks || cp.items;
+          if (Array.isArray(tasks)) {
+            for (const t of tasks) {
+              const s = typeof t === 'string' ? t : (t as any).title || JSON.stringify(t);
+              lines.push(`  • ${s}`);
+            }
+          }
+        }
+      } else if (typeof checkpoints === 'object') {
+        for (const [week, value] of Object.entries(checkpoints)) {
+          if (typeof value === 'string') {
+            lines.push(`*${week}* — ${value}`);
+          } else if (typeof value === 'object' && value !== null) {
+            const v = value as any;
+            const focus = v.focus || v.mainFocus || v.goal || '';
+            lines.push(`\n*${week}*${focus ? ` — ${focus}` : ''}`);
+            const tasks = v.tasks || v.items;
+            if (Array.isArray(tasks)) {
+              for (const t of tasks) {
+                const s = typeof t === 'string' ? t : t.title || JSON.stringify(t);
+                lines.push(`  • ${s}`);
+              }
+            }
+          }
+        }
+      }
+      lines.push('');
+    }
+
+    // Риски
+    if (plan.risks && Array.isArray(plan.risks) && plan.risks.length > 0) {
+      lines.push('⚠️ *Риски:*');
+      for (const risk of plan.risks) {
+        const text = typeof risk === 'string' ? risk : risk.risk || risk.description || '';
+        const mit = typeof risk === 'string' ? '' : risk.mitigation || risk.plan || '';
+        lines.push(`• ${text}${mit ? `\n  → ${mit}` : ''}`);
+      }
+      lines.push('');
+    }
+
+    // Метрики
+    const metrics = plan.metrics || plan.kpis;
+    if (metrics && typeof metrics === 'object') {
+      lines.push('📊 *Метрики:*');
+      if (metrics.focusHours) lines.push(`• Часы фокуса: ${metrics.focusHours}`);
+      if (metrics.trainings) lines.push(`• Тренировки: ${metrics.trainings}`);
+      if (metrics.clientCases) lines.push(`• Клиентские дела: ${metrics.clientCases}`);
+      if (metrics.contentPosts) lines.push(`• Контент/посты: ${metrics.contentPosts}`);
+      if (metrics.mood) lines.push(`• Настроение: ${metrics.mood}/10`);
+    }
+
+    await this.sendLongMessage(ctx, lines.join('\n'));
+  }
+
+  // -------------------------------------------------------
+  // Утилиты
+  // -------------------------------------------------------
+
+  private async sendLongMessage(ctx: Context, text: string) {
+    let remaining = text;
+    while (remaining.length > 0) {
+      if (remaining.length <= 4000) {
+        await ctx.reply(remaining, { parse_mode: 'Markdown' });
+        break;
+      }
+      const cut = remaining.lastIndexOf('\n', 4000);
+      await ctx.reply(remaining.slice(0, cut), { parse_mode: 'Markdown' });
+      remaining = remaining.slice(cut);
+    }
+  }
+}

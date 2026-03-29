@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: planner-db
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-planner}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-planner_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-primelegal}
+    ports:
+      - '5432:5432'
+    volumes:
+      - planner_data:/var/lib/postgresql/data
+      - ./src/planner/migration.sql:/docker-entrypoint-initdb.d/01-migration.sql
+
+  app:
+    build: .
+    container_name: planner-app
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - '${PORT:-3000}:3000'
+    depends_on:
+      - postgres
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-planner}:${POSTGRES_PASSWORD:-planner_secret}@postgres:5432/${POSTGRES_DB:-primelegal}
+
+volumes:
+  planner_data:
