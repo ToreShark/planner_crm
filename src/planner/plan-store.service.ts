@@ -196,6 +196,62 @@ export class PlanStoreService {
   }
 
   /**
+   * Обновить итоги плана недели
+   */
+  async updatePlanResults(
+    planId: string,
+    updates: {
+      addWins?: string[];
+      removeWins?: string[];
+      addMistakes?: string[];
+      removeMistakes?: string[];
+      addNextPriorities?: string[];
+    },
+  ): Promise<PlanEntity> {
+    const plan = await this.planRepo.findOne({ where: { id: planId } });
+    if (!plan) throw new Error(`Plan ${planId} not found`);
+
+    const results = plan.results || { wins: [], mistakes: [], nextPriorities: [] };
+
+    if (updates.addWins?.length) {
+      results.wins = [...(results.wins || []), ...updates.addWins];
+    }
+    if (updates.removeWins?.length) {
+      results.wins = (results.wins || []).filter(
+        (w) => !updates.removeWins.some((r) => w.toLowerCase().includes(r.toLowerCase())),
+      );
+    }
+    if (updates.addMistakes?.length) {
+      results.mistakes = [...(results.mistakes || []), ...updates.addMistakes];
+    }
+    if (updates.removeMistakes?.length) {
+      results.mistakes = (results.mistakes || []).filter(
+        (m) => !updates.removeMistakes.some((r) => m.toLowerCase().includes(r.toLowerCase())),
+      );
+    }
+    if (updates.addNextPriorities?.length) {
+      results.nextPriorities = [...(results.nextPriorities || []), ...updates.addNextPriorities];
+    }
+
+    plan.results = results;
+    return this.planRepo.save(plan);
+  }
+
+  /**
+   * Обновить статус задачи по ID
+   */
+  async updateTaskStatus(taskId: string, status: string): Promise<TaskEntity | null> {
+    const task = await this.taskRepo.findOne({ where: { id: taskId } });
+    if (!task) return null;
+
+    task.status = status as any;
+    if (status === 'done') {
+      task.completedAt = new Date();
+    }
+    return this.taskRepo.save(task);
+  }
+
+  /**
    * Все будущие задачи (после сегодня)
    */
   async getUpcomingTasks(): Promise<Array<{ date: string; focusTitle: string; tasks: TaskEntity[] }>> {

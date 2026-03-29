@@ -251,6 +251,78 @@ ${JSON.stringify(plan, null, 2)}
   }
 
   // -------------------------------------------------------
+  // AI-агент обновления итогов недели/дня/месяца
+  // -------------------------------------------------------
+
+  async analyzeWeekUpdate(
+    userText: string,
+    weekPlan: any,
+    dayPlans: any[],
+  ): Promise<{
+    addWins: string[];
+    removeWins: string[];
+    addMistakes: string[];
+    removeMistakes: string[];
+    addNextPriorities: string[];
+    taskUpdates: Array<{ taskId: string; newStatus: string }>;
+    comment?: string;
+  }> {
+    const tasksContext = dayPlans.flatMap((dp) =>
+      (dp.tasks || []).map((t) => ({
+        id: t.id,
+        date: dp.date,
+        title: t.title,
+        status: t.status,
+        category: t.category,
+      })),
+    );
+
+    const currentResults = weekPlan.results || { wins: [], mistakes: [], nextPriorities: [] };
+
+    const prompt = `Ты — AI-агент планировщика. Пользователь написал свободный текст об итогах недели.
+Твоя задача — определить, что нужно обновить в плане недели.
+
+## Текущий план недели
+Фокус: ${weekPlan.focusTitle}
+Период: ${weekPlan.date} – ${weekPlan.dateEnd}
+
+## Текущие итоги (results)
+Победы: ${JSON.stringify(currentResults.wins || [])}
+Ошибки: ${JSON.stringify(currentResults.mistakes || [])}
+Приоритеты на след. неделю: ${JSON.stringify(currentResults.nextPriorities || [])}
+
+## Задачи за неделю (все дни)
+${JSON.stringify(tasksContext, null, 2)}
+
+## Сообщение пользователя
+"${userText}"
+
+## Инструкции
+Проанализируй сообщение пользователя в контексте плана недели и задач.
+Определи:
+1. Какие победы ДОБАВИТЬ в wins (то, чего ещё нет)
+2. Какие ошибки УБРАТЬ из mistakes (если пользователь сообщает что задача выполнена, например "закончил кассацию" → убрать "Не закончил кассацию" из ошибок)
+3. Какие задачи пометить как done (по taskId, если пользователь подтверждает выполнение)
+4. Короткий мотивирующий комментарий
+
+НЕ ДУБЛИРУЙ уже существующие победы.
+Если пользователь пишет "кассация Темирбаева" — найди связанную задачу и обнови.
+
+Верни СТРОГО JSON:
+{
+  "addWins": ["новые победы"],
+  "removeWins": [],
+  "addMistakes": [],
+  "removeMistakes": ["ошибки для удаления, если задача выполнена"],
+  "addNextPriorities": [],
+  "taskUpdates": [{"taskId": "uuid задачи", "newStatus": "done"}],
+  "comment": "Мотивирующий комментарий"
+}`;
+
+    return this.callClaude(prompt);
+  }
+
+  // -------------------------------------------------------
   // Умный парсинг задачи из текста
   // -------------------------------------------------------
 

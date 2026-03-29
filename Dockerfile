@@ -3,9 +3,10 @@ FROM node:20-alpine
 WORKDIR /app
 
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci
 
-COPY dist/ ./dist/
+COPY . .
+RUN rm -f tsconfig.tsbuildinfo && npm run build
 
 EXPOSE 3000
 

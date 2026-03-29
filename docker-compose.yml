@@ -11,7 +11,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-planner_secret}
       POSTGRES_DB: ${POSTGRES_DB:-primelegal}
     ports:
-      - '5432:5432'
+      - '5433:5432'
     volumes:
       - planner_data:/var/lib/postgresql/data
       - ./src/planner/migration.sql:/docker-entrypoint-initdb.d/01-migration.sql
@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
     env_file: .env
     ports:
-      - '${PORT:-3000}:3000'
+      - '${PORT:-3005}:3000'
     depends_on:
       - postgres
     environment:

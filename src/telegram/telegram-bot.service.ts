@@ -74,13 +74,56 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   }
 
   async onModuleInit() {
+    this.bot.catch((err, ctx) => {
+      this.logger.error(`Telegraf error for ${ctx?.updateType}`, err);
+    });
+
     this.setupMiddleware();
     this.setupCommands();
     this.setupCallbacks();
     this.setupTextHandler();
+    this.logger.log('Telegram bot handlers registered');
+  }
 
-    await this.bot.launch();
-    this.logger.log('Telegram bot started');
+  async startPolling() {
+    try {
+      await this.bot.telegram.deleteWebhook({ drop_pending_updates: true });
+      this.logger.log('Webhook cleared');
+    } catch (e) {
+      this.logger.warn('deleteWebhook failed: ' + e.message);
+    }
+
+    const me = await this.bot.telegram.getMe();
+    this.logger.log(`Bot identity: @${me.username} (id: ${me.id})`);
+
+    // Ручной polling вместо Telegraf launch
+    let offset = 0;
+    const poll = async () => {
+      try {
+        const updates = await this.bot.telegram.callApi('getUpdates', {
+          offset,
+          timeout: 30,
+          allowed_updates: ['message', 'callback_query'],
+        });
+        if (updates && updates.length > 0) {
+          this.logger.log(`Received ${updates.length} update(s)`);
+          for (const update of updates) {
+            offset = update.update_id + 1;
+            try {
+              await this.bot.handleUpdate(update);
+            } catch (err) {
+              this.logger.error('handleUpdate error: ' + err.message);
+            }
+          }
+        }
+      } catch (err) {
+        this.logger.error('Polling error: ' + err.message);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
+      setImmediate(poll);
+    };
+    poll();
+    this.logger.log('Telegram bot manual polling started');
   }
 
   async onModuleDestroy() {
@@ -125,6 +168,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
           '*Итоги:*\n' +
           '/dayresults — Итоги дня\n' +
           '/weekresults — Итоги недели\n' +
+          '/weekreview — 🤖 AI-обновление итогов недели\n' +
           '/monthresults — Итоги месяца\n\n' +
           '*Управление:*\n' +
           '/status — Текущий прогресс\n' +
@@ -393,6 +437,79 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       const dayPlans = await this.planStore.getDayPlans(startDate, endDate);
 
       await this.sendWeekResults(ctx, plan, dayPlans);
+    });
+
+    // /weekreview <текст> — AI-агент обновляет итоги недели
+    this.bot.command('weekreview', async (ctx) => {
+      const userText = ctx.message.text.replace('/weekreview', '').trim();
+      if (!userText) {
+        await ctx.reply(
+          '✏️ Напиши итоги после команды:\n\n' +
+            '`/weekreview кассация Темирбаева закрыта, договор на 200к`\n\n' +
+            'Или просто напиши свободным текстом — Claude сам разберётся что обновить в плане недели.',
+          { parse_mode: 'Markdown' },
+        );
+        return;
+      }
+
+      const weekPlan = await this.planStore.getWeekPlan();
+      if (!weekPlan) {
+        await ctx.reply('📅 Плана недели нет.');
+        return;
+      }
+
+      const startDate = weekPlan.date;
+      const endDate = weekPlan.dateEnd || weekPlan.date;
+      const dayPlans = await this.planStore.getDayPlans(startDate, endDate);
+
+      await ctx.reply('🤖 Анализирую...');
+
+      try {
+        const updates = await this.plannerService.analyzeWeekUpdate(
+          userText,
+          weekPlan,
+          dayPlans,
+        );
+
+        // Обновляем results в плане недели
+        await this.planStore.updatePlanResults(weekPlan.id, {
+          addWins: updates.addWins,
+          removeWins: updates.removeWins,
+          addMistakes: updates.addMistakes,
+          removeMistakes: updates.removeMistakes,
+          addNextPriorities: updates.addNextPriorities,
+        });
+
+        // Обновляем статусы задач
+        for (const tu of updates.taskUpdates || []) {
+          await this.planStore.updateTaskStatus(tu.taskId, tu.newStatus);
+        }
+
+        // Формируем ответ
+        const lines: string[] = [];
+        lines.push('✅ *Итоги недели обновлены!*\n');
+
+        if (updates.addWins?.length) {
+          lines.push('🔥 *Добавлены победы:*');
+          updates.addWins.forEach((w) => lines.push(`  + ${w}`));
+        }
+        if (updates.removeMistakes?.length) {
+          lines.push('\n🗑 *Убрано из ошибок:*');
+          updates.removeMistakes.forEach((m) => lines.push(`  − ${m}`));
+        }
+        if (updates.taskUpdates?.length) {
+          lines.push(`\n📋 *Задач обновлено:* ${updates.taskUpdates.length}`);
+        }
+        if (updates.comment) {
+          lines.push(`\n💬 ${updates.comment}`);
+        }
+        lines.push('\n_Используй /weekresults чтобы увидеть обновлённые итоги._');
+
+        await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+      } catch (error) {
+        this.logger.error('Week review update failed', error);
+        await ctx.reply('⚠️ Ошибка при обновлении. Попробуй позже.');
+      }
     });
 
     // /monthresults — итоги месяца
