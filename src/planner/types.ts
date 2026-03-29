@@ -184,6 +184,13 @@ export interface PlannerContext {
   energyLevel?: number;
   place?: string;
 
+  // Предзапланированные задачи (из smart task)
+  scheduledTasks?: Array<{
+    title: string;
+    description?: string;
+    priority: string;
+  }>;
+
   // История (для обучения)
   recentCompletionRate?: number;   // % выполнения за последние 7 дней
   commonDeferrals?: string[];      // что часто переносится

@@ -3,7 +3,7 @@
 // Собирает данные из CRM, календаря, заметок → формирует контекст для Claude
 // ============================================================
 
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
 import {
   PlannerContext,
   PlanType,
@@ -12,10 +12,16 @@ import {
   WeeklyPlanInput,
   MonthlyPlanInput,
 } from './types';
+import { PlanStoreService } from './plan-store.service';
 
 @Injectable()
 export class ContextBuilderService {
   private readonly logger = new Logger(ContextBuilderService.name);
+
+  constructor(
+    @Inject(forwardRef(() => PlanStoreService))
+    private readonly planStore: PlanStoreService,
+  ) {}
 
   /**
    * Главный метод — собирает полный контекст для генерации плана
@@ -31,7 +37,9 @@ export class ContextBuilderService {
     const now = new Date();
     const days = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
 
-    const [activeCases, upcomingDeadlines, calendarEvents, weekPlan, monthPlan, stats] =
+    const todayStr = now.toISOString().split('T')[0];
+
+    const [activeCases, upcomingDeadlines, calendarEvents, weekPlan, monthPlan, stats, scheduledTasks] =
       await Promise.all([
         this.getActiveCases(),
         this.getUpcomingDeadlines(planType),
@@ -39,11 +47,14 @@ export class ContextBuilderService {
         this.getCurrentWeekPlan(),
         this.getCurrentMonthPlan(),
         this.getCompletionStats(),
+        planType === PlanType.DAY
+          ? this.planStore.getScheduledTasks(todayStr)
+          : Promise.resolve([]),
       ]);
 
     return {
       planType,
-      currentDate: now.toISOString().split('T')[0],
+      currentDate: todayStr,
       dayOfWeek: days[now.getDay()],
       activeCases,
       upcomingDeadlines,
@@ -53,6 +64,11 @@ export class ContextBuilderService {
       quickNotes: options?.quickNotes,
       energyLevel: options?.energyLevel,
       place: options?.place,
+      scheduledTasks: scheduledTasks.map((t) => ({
+        title: t.title,
+        description: t.description,
+        priority: t.priority,
+      })),
       recentCompletionRate: stats.completionRate,
       commonDeferrals: stats.commonDeferrals,
     };
@@ -264,6 +280,16 @@ export class ContextBuilderService {
     }
     if (ctx.commonDeferrals && ctx.commonDeferrals.length > 0) {
       sections.push(`## Часто переносимые задачи: ${ctx.commonDeferrals.join(', ')}`);
+    }
+
+    // Предзапланированные задачи (ОБЯЗАТЕЛЬНО включить в план)
+    if (ctx.scheduledTasks && ctx.scheduledTasks.length > 0) {
+      sections.push('## ⚡ ПРЕДЗАПЛАНИРОВАННЫЕ ЗАДАЧИ (ОБЯЗАТЕЛЬНО включить в план):');
+      for (const t of ctx.scheduledTasks) {
+        let line = `- [${t.priority.toUpperCase()}] ${t.title}`;
+        if (t.description) line += ` — ${t.description}`;
+        sections.push(line);
+      }
     }
 
     return sections.join('\n');

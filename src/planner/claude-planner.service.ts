@@ -251,6 +251,46 @@ ${JSON.stringify(plan, null, 2)}
   }
 
   // -------------------------------------------------------
+  // Умный парсинг задачи из текста
+  // -------------------------------------------------------
+
+  async parseSmartTask(rawText: string, currentDate: string, dayOfWeek: string): Promise<{
+    title: string;
+    scheduledDate: string;
+    clientName?: string;
+    phone?: string;
+    caseContext?: string;
+    priority: string;
+    category: string;
+    estimatedMinutes?: number;
+  }> {
+    const prompt = `Ты — парсер задач. Сегодня ${currentDate} (${dayOfWeek}).
+
+Пользователь написал:
+"${rawText}"
+
+Извлеки структурированную задачу. Разреши относительные даты:
+- "завтра" = следующий день
+- "в пятницу" / "в следующую пятницу" = ближайшая пятница от сегодня
+- "через неделю" = +7 дней
+- Если дата не указана — поставь сегодня.
+
+Верни СТРОГО JSON:
+{
+  "title": "Краткое название задачи (действие)",
+  "scheduledDate": "YYYY-MM-DD",
+  "clientName": "Имя клиента или null",
+  "phone": "Телефон или null",
+  "caseContext": "Контекст дела (кратко) или null",
+  "priority": "critical|high|medium|low",
+  "category": "work|tech|marketing|health|personal",
+  "estimatedMinutes": число_или_null
+}`;
+
+    return this.callClaude(prompt);
+  }
+
+  // -------------------------------------------------------
   // Базовый вызов Claude API
   // -------------------------------------------------------
 

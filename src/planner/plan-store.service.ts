@@ -138,4 +138,54 @@ export class PlanStoreService {
       totalPayments,
     };
   }
+
+  /**
+   * Получить или создать план дня (для будущих задач)
+   */
+  async getOrCreateDayPlan(date: string): Promise<PlanEntity> {
+    let plan = await this.getDayPlan(date);
+    if (plan) return plan;
+
+    // Создаём placeholder план
+    const newPlan = this.planRepo.create({
+      type: PlanType.DAY,
+      date,
+      focusTitle: 'Запланированные задачи',
+    });
+    return this.planRepo.save(newPlan);
+  }
+
+  /**
+   * Добавить задачу к плану
+   */
+  async addTaskToPlan(planId: string, task: {
+    title: string;
+    description?: string;
+    category: string;
+    priority: string;
+    estimatedMinutes?: number;
+  }): Promise<TaskEntity> {
+    const count = await this.taskRepo.count({ where: { planId } });
+
+    const newTask = this.taskRepo.create({
+      planId,
+      title: task.title,
+      description: task.description,
+      category: task.category as any,
+      priority: task.priority as any,
+      status: 'pending' as any,
+      estimatedMinutes: task.estimatedMinutes,
+      sortOrder: count + 1,
+    });
+    return this.taskRepo.save(newTask);
+  }
+
+  /**
+   * Получить запланированные задачи на дату
+   */
+  async getScheduledTasks(date: string): Promise<TaskEntity[]> {
+    const plan = await this.getDayPlan(date);
+    if (!plan) return [];
+    return plan.tasks || [];
+  }
 }

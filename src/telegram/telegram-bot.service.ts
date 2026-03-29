@@ -575,7 +575,13 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // Иначе — добавляем как задачу
+      // Если текст длинный и содержит дату/время — smart task через Claude
+      if (this.isSmartTask(text)) {
+        await this.handleSmartTask(ctx, text);
+        return;
+      }
+
+      // Иначе — простое добавление как задачу на сегодня
       await this.addTaskFromText(ctx, text);
     });
   }
@@ -1226,6 +1232,65 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         ]),
       },
     );
+  }
+
+  // -------------------------------------------------------
+  // Smart Task — Claude парсит текст → задача на будущую дату
+  // -------------------------------------------------------
+
+  private isSmartTask(text: string): boolean {
+    const lower = text.toLowerCase();
+    const hasDateWords = /завтра|послезавтра|понедельник|вторник|сред[уа]|четверг|пятниц|суббот|воскресень|следующ|через\s+\d|на\s+недел|\d{1,2}[\/.]\d{1,2}/.test(lower);
+    const isLongEnough = text.length > 30;
+    return hasDateWords && isLongEnough;
+  }
+
+  private async handleSmartTask(ctx: Context, text: string) {
+    await ctx.reply('🤖 Анализирую задачу...');
+
+    try {
+      const now = new Date();
+      const days = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
+      const currentDate = now.toISOString().split('T')[0];
+
+      const parsed = await this.plannerService.parseSmartTask(text, currentDate, days[now.getDay()]);
+
+      // Сохраняем в БД
+      const plan = await this.planStore.getOrCreateDayPlan(parsed.scheduledDate);
+
+      const description = [
+        parsed.clientName ? `Клиент: ${parsed.clientName}` : '',
+        parsed.phone ? `Тел: ${parsed.phone}` : '',
+        parsed.caseContext ? `Контекст: ${parsed.caseContext}` : '',
+      ].filter(Boolean).join('\n');
+
+      await this.planStore.addTaskToPlan(plan.id, {
+        title: parsed.title,
+        description: description || undefined,
+        category: parsed.category,
+        priority: parsed.priority,
+        estimatedMinutes: parsed.estimatedMinutes,
+      });
+
+      // Формируем подтверждение
+      const lines: string[] = [];
+      lines.push(`✅ *Задача запланирована на ${parsed.scheduledDate}*\n`);
+      lines.push(`📋 *${parsed.title}*`);
+      if (parsed.clientName) lines.push(`👤 Клиент: ${parsed.clientName}`);
+      if (parsed.phone) lines.push(`📞 ${parsed.phone}`);
+      if (parsed.caseContext) lines.push(`📁 ${parsed.caseContext}`);
+      lines.push(`\n${PRIORITY_EMOJI[parsed.priority] || '🟡'} Приоритет: ${parsed.priority}`);
+      lines.push(`${CATEGORY_EMOJI[parsed.category] || '📌'} Категория: ${parsed.category}`);
+      if (parsed.estimatedMinutes) lines.push(`⏱ ~${parsed.estimatedMinutes} мин`);
+      lines.push(`\n_В утреннем плане на ${parsed.scheduledDate} эта задача появится автоматически._`);
+
+      await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+    } catch (error) {
+      this.logger.error('Smart task parsing failed', error);
+      // Fallback — добавляем как обычную задачу на сегодня
+      await ctx.reply('⚠️ Не удалось распарсить. Добавляю как обычную задачу на сегодня.');
+      await this.addTaskFromText(ctx, text);
+    }
   }
 
   private detectCategory(text: string): TaskCategory {
