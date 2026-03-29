@@ -1,14 +1,15 @@
 // ============================================================
 // Planner Cron Service
-// Автоматическая отправка утреннего плана и вечернего обзора
+// Автоматическая отправка планов и обзоров
 //
 // Расписание (Алматы, UTC+5):
-// - 07:00 — утренний план
-// - 21:00 — вечерний обзор
+// - Пн-Сб 07:00 — утренний план
+// - Пн-Сб 21:00 — вечерний обзор
+// - Вс    10:00 — итоги недели + задача на воскресенье
 // ============================================================
 
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
 import { TelegramBotService } from './telegram-bot.service';
 
 @Injectable()
@@ -18,14 +19,12 @@ export class PlannerCronService {
   constructor(private readonly telegramBot: TelegramBotService) {}
 
   /**
-   * Утренний план — 07:00 Алматы (02:00 UTC)
-   * Генерирует план дня через Claude API и отправляет в Telegram
+   * Утренний план — 07:00 Алматы (02:00 UTC), Пн-Сб
    */
   @Cron('0 2 * * 1-6', {
     name: 'morning-plan',
     timeZone: 'UTC',
   })
-  // Пн-Сб. Воскресенье — отдых, план не генерируется.
   async sendMorningPlan() {
     this.logger.log('Triggering morning plan...');
     try {
@@ -36,7 +35,7 @@ export class PlannerCronService {
   }
 
   /**
-   * Вечерний обзор — 21:00 Алматы (16:00 UTC)
+   * Вечерний обзор — 21:00 Алматы (16:00 UTC), Пн-Сб
    */
   @Cron('0 16 * * 1-6', {
     name: 'evening-review',
@@ -48,6 +47,22 @@ export class PlannerCronService {
       await this.telegramBot.sendEveningReview();
     } catch (error) {
       this.logger.error('Evening review cron failed', error);
+    }
+  }
+
+  /**
+   * Воскресенье 10:00 Алматы (05:00 UTC) — итоги недели
+   */
+  @Cron('0 5 * * 0', {
+    name: 'sunday-review',
+    timeZone: 'UTC',
+  })
+  async sendSundayReview() {
+    this.logger.log('Triggering Sunday week review...');
+    try {
+      await this.telegramBot.sendSundayMessage();
+    } catch (error) {
+      this.logger.error('Sunday review cron failed', error);
     }
   }
 }

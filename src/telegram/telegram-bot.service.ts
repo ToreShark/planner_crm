@@ -261,20 +261,39 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     // ПРОСМОТР ПЛАНОВ ИЗ БД
     // ==========================================
 
-    // /today — план на сегодня из БД
+    // /today — план на сегодня из БД (или из контрольной точки недели)
     this.bot.command('today', async (ctx) => {
       const today = new Date().toISOString().split('T')[0];
       const plan = await this.planStore.getDayPlan(today);
 
-      if (!plan) {
-        await ctx.reply(
-          `📅 На *${today}* плана нет.\n\nИспользуй /plan чтобы создать.`,
-          { parse_mode: 'Markdown' },
-        );
+      if (plan) {
+        await this.sendStoredDayPlan(ctx, plan);
         return;
       }
 
-      await this.sendStoredDayPlan(ctx, plan);
+      // Нет отдельного плана дня — ищем контрольную точку в плане недели
+      const weekPlan = await this.planStore.getWeekPlan(today);
+      if (weekPlan && weekPlan.checkpoints) {
+        const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+        const dayShort = days[new Date().getDay()];
+        const checkpoint = weekPlan.checkpoints[dayShort];
+
+        if (checkpoint) {
+          const lines: string[] = [];
+          lines.push(`🗓 *${today}* (${dayShort})\n`);
+          lines.push(`🎯 *Фокус недели:* ${weekPlan.focusTitle}\n`);
+          lines.push(`📋 *На сегодня (из плана недели):*`);
+          lines.push(`${checkpoint}\n`);
+          lines.push(`_Отдельного плана нет. Используй /plan чтобы создать детальный._`);
+          await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+          return;
+        }
+      }
+
+      await ctx.reply(
+        `📅 На *${today}* плана нет.\n\nИспользуй /plan чтобы создать.`,
+        { parse_mode: 'Markdown' },
+      );
     });
 
     // /thisweek — план текущей недели из БД
@@ -924,6 +943,78 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       await this.bot.telegram.sendMessage(this.allowedUserId, message, { parse_mode: 'Markdown' });
     } catch (error) {
       this.logger.error('Evening review failed', error);
+    }
+  }
+
+  /**
+   * Воскресное сообщение — итоги недели + задача дня
+   */
+  async sendSundayMessage() {
+    try {
+      const weekPlan = await this.planStore.getWeekPlan();
+      const today = new Date().toISOString().split('T')[0];
+
+      const lines: string[] = [];
+      lines.push('☀️ *Доброе утро! Сегодня воскресенье.*\n');
+
+      // Контрольная точка на воскресенье
+      if (weekPlan?.checkpoints?.['Вс']) {
+        lines.push(`📋 *На сегодня:* ${weekPlan.checkpoints['Вс']}\n`);
+      } else {
+        lines.push('📋 *На сегодня:* Подведение итогов недели и отдых.\n');
+      }
+
+      // Итоги недели
+      if (weekPlan) {
+        const startDate = weekPlan.date;
+        const endDate = weekPlan.dateEnd || today;
+        const dayPlans = await this.planStore.getDayPlans(startDate, endDate);
+
+        const allTasks = dayPlans.flatMap((p) => p.tasks || []);
+        const done = allTasks.filter((t) => t.status === 'done');
+        const deferred = allTasks.filter((t) => t.status === 'deferred');
+        const pct = allTasks.length > 0 ? Math.round((done.length / allTasks.length) * 100) : 0;
+
+        const allPayments = dayPlans.flatMap((p) => p.payments || []);
+        const payTotal = allPayments.filter((p) => p.received).reduce((s, p) => s + p.amount, 0);
+
+        lines.push(`📊 *Итоги недели:*`);
+        lines.push(`${this.progressBar(pct)} *${pct}%* (${done.length}/${allTasks.length})`);
+        if (payTotal > 0) lines.push(`💰 Оплаты: ${(payTotal / 1000).toFixed(0)}K тенге`);
+        lines.push('');
+
+        if (done.length > 0) {
+          lines.push('✅ *Сделано:*');
+          for (const t of done.slice(0, 8)) {
+            lines.push(`• ${t.title}`);
+          }
+          if (done.length > 8) lines.push(`_...и ещё ${done.length - 8}_`);
+          lines.push('');
+        }
+
+        if (deferred.length > 0) {
+          lines.push('➡️ *Перенесено (взять на след. неделю):*');
+          const unique = [...new Set(deferred.map((t) => t.title))];
+          for (const title of unique.slice(0, 5)) {
+            lines.push(`• ${title}`);
+          }
+          lines.push('');
+        }
+
+        lines.push('🎯 *Вопросы для размышления:*');
+        lines.push('1) Что было главной победой?');
+        lines.push('2) Что мешало больше всего?');
+        lines.push('3) Три приоритета на следующую неделю?\n');
+        lines.push('Используй /weekresults для полного обзора.');
+        lines.push('Используй /week чтобы составить план на новую неделю.');
+      }
+
+      await this.bot.telegram.sendMessage(this.allowedUserId, lines.join('\n'), {
+        parse_mode: 'Markdown',
+      });
+      this.logger.log('Sunday message sent');
+    } catch (error) {
+      this.logger.error('Sunday message failed', error);
     }
   }
 
