@@ -2054,9 +2054,28 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // Контрольные точки
     if (plan.checkpoints) {
+      const dayOrder = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
+      const entries = Object.entries(plan.checkpoints);
+      entries.sort((a, b) => {
+        const ia = dayOrder.indexOf(a[0]);
+        const ib = dayOrder.indexOf(b[0]);
+        return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+      });
       lines.push('📋 *По дням:*');
-      for (const [day, text] of Object.entries(plan.checkpoints)) {
-        lines.push(`*${day}* — ${text}`);
+      for (const [day, val] of entries) {
+        if (typeof val === 'string') {
+          lines.push(`*${day}* — ${val}`);
+        } else {
+          const v = val as any;
+          const focus = v.focus || v.label || '';
+          lines.push(`*${day}* — ${focus}`);
+          if (Array.isArray(v.tasks)) {
+            for (const t of v.tasks) {
+              const title = typeof t === 'string' ? t : t.title || '';
+              lines.push(`  • ${title}`);
+            }
+          }
+        }
       }
       lines.push('');
     }
