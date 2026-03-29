@@ -27,6 +27,7 @@ services:
       - postgres
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-planner}:${POSTGRES_PASSWORD:-planner_secret}@postgres:5432/${POSTGRES_DB:-primelegal}
+      TZ: Asia/Almaty
 
 volumes:
   planner_data:
