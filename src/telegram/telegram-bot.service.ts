@@ -119,6 +119,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
           '/thisweek — Посмотреть план недели\n' +
           '/history — Планы за последние 7 дней\n' +
           '/stats — Статистика и оплаты\n\n' +
+          '*Будущие задачи:*\n' +
+          '/upcoming — Все предстоящие задачи\n' +
+          '/tasks 2026-04-04 — Задачи на дату\n\n' +
           '*Итоги:*\n' +
           '/dayresults — Итоги дня\n' +
           '/weekresults — Итоги недели\n' +
@@ -408,6 +411,70 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       }
 
       await this.sendMonthResults(ctx, dayPlans, weekPlan, monthPlan);
+    });
+
+    // ==========================================
+    // ПРОСМОТР БУДУЩИХ ЗАДАЧ
+    // ==========================================
+
+    // /tasks 2026-04-04 — задачи на конкретную дату
+    this.bot.command('tasks', async (ctx) => {
+      const dateArg = ctx.message.text.replace('/tasks', '').trim();
+      if (!dateArg) {
+        await ctx.reply(
+          '📋 Укажи дату:\n`/tasks 2026-04-04`\n\nИли используй /upcoming для всех будущих задач.',
+          { parse_mode: 'Markdown' },
+        );
+        return;
+      }
+
+      const tasks = await this.planStore.getScheduledTasks(dateArg);
+      if (tasks.length === 0) {
+        await ctx.reply(`📅 На *${dateArg}* задач нет.`, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      const lines: string[] = [];
+      lines.push(`📋 *Задачи на ${dateArg}:*\n`);
+      for (const t of tasks) {
+        const status = STATUS_EMOJI[t.status] || '⬜';
+        const priority = PRIORITY_EMOJI[t.priority] || '';
+        const cat = CATEGORY_EMOJI[t.category] || '';
+        lines.push(`${status} ${priority}${cat} *${t.title}*`);
+        if (t.description) lines.push(`  _${t.description.replace(/\n/g, ', ')}_`);
+      }
+
+      await this.sendLongMessage(ctx, lines.join('\n'));
+    });
+
+    // /upcoming — все будущие задачи
+    this.bot.command('upcoming', async (ctx) => {
+      const upcoming = await this.planStore.getUpcomingTasks();
+
+      if (upcoming.length === 0) {
+        await ctx.reply('📋 Нет запланированных задач.');
+        return;
+      }
+
+      const lines: string[] = [];
+      lines.push('📋 *Предстоящие задачи:*\n');
+
+      for (const day of upcoming) {
+        lines.push(`📅 *${day.date}*`);
+        for (const t of day.tasks) {
+          const status = STATUS_EMOJI[t.status] || '⬜';
+          const priority = PRIORITY_EMOJI[t.priority] || '';
+          const cat = CATEGORY_EMOJI[t.category] || '';
+          lines.push(`  ${status} ${priority}${cat} ${t.title}`);
+          if (t.description) {
+            const short = t.description.split('\n').slice(0, 2).join(', ');
+            lines.push(`    _${short}_`);
+          }
+        }
+        lines.push('');
+      }
+
+      await this.sendLongMessage(ctx, lines.join('\n'));
     });
   }
 
@@ -1203,11 +1270,15 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       const today = new Date().toISOString().split('T')[0];
       const plan = await this.planStore.getOrCreateDayPlan(today);
       const category = this.detectCategory(text);
-      await this.planStore.addTaskToPlan(plan.id, {
+      const saved = await this.planStore.addTaskToPlan(plan.id, {
         title: text,
         category,
         priority: 'medium',
       });
+      if (!saved) {
+        await ctx.reply(`⚠️ Такая задача уже есть на сегодня.`);
+        return;
+      }
       await ctx.reply(
         `➕ Задача сохранена на *${today}*:\n${CATEGORY_EMOJI[category] || '📌'} ${text}\n\n_Используй /plan чтобы сгенерировать полный план дня._`,
         { parse_mode: 'Markdown' },
@@ -1276,13 +1347,18 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         parsed.caseContext ? `Контекст: ${parsed.caseContext}` : '',
       ].filter(Boolean).join('\n');
 
-      await this.planStore.addTaskToPlan(plan.id, {
+      const saved = await this.planStore.addTaskToPlan(plan.id, {
         title: parsed.title,
         description: description || undefined,
         category: parsed.category,
         priority: parsed.priority,
         estimatedMinutes: parsed.estimatedMinutes,
       });
+
+      if (!saved) {
+        await ctx.reply(`⚠️ Такая задача уже есть на *${parsed.scheduledDate}*: ${parsed.title}`, { parse_mode: 'Markdown' });
+        return;
+      }
 
       // Формируем подтверждение
       const lines: string[] = [];

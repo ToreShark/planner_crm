@@ -164,7 +164,13 @@ export class PlanStoreService {
     category: string;
     priority: string;
     estimatedMinutes?: number;
-  }): Promise<TaskEntity> {
+  }): Promise<TaskEntity | null> {
+    // Дедупликация: проверяем есть ли похожая задача
+    const existing = await this.taskRepo.findOne({
+      where: { planId, title: task.title },
+    });
+    if (existing) return null; // Дубль
+
     const count = await this.taskRepo.count({ where: { planId } });
 
     const newTask = this.taskRepo.create({
@@ -187,5 +193,30 @@ export class PlanStoreService {
     const plan = await this.getDayPlan(date);
     if (!plan) return [];
     return plan.tasks || [];
+  }
+
+  /**
+   * Все будущие задачи (после сегодня)
+   */
+  async getUpcomingTasks(): Promise<Array<{ date: string; focusTitle: string; tasks: TaskEntity[] }>> {
+    const today = new Date().toISOString().split('T')[0];
+
+    const plans = await this.planRepo.find({
+      where: {
+        type: PlanType.DAY,
+        date: MoreThanOrEqual(today),
+      },
+      relations: ['tasks'],
+      order: { date: 'ASC' },
+      take: 30,
+    });
+
+    return plans
+      .filter((p) => p.tasks && p.tasks.length > 0)
+      .map((p) => ({
+        date: p.date,
+        focusTitle: p.focusTitle,
+        tasks: p.tasks,
+      }));
   }
 }
