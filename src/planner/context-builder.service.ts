@@ -39,7 +39,7 @@ export class ContextBuilderService {
 
     const todayStr = now.toISOString().split('T')[0];
 
-    const [activeCases, upcomingDeadlines, calendarEvents, weekPlan, monthPlan, stats, scheduledTasks] =
+    const [activeCases, upcomingDeadlines, calendarEvents, weekPlan, monthPlan, stats, scheduledTasks, upcomingTasks] =
       await Promise.all([
         this.getActiveCases(),
         this.getUpcomingDeadlines(planType),
@@ -49,6 +49,9 @@ export class ContextBuilderService {
         this.getCompletionStats(),
         planType === PlanType.DAY
           ? this.planStore.getScheduledTasks(todayStr)
+          : Promise.resolve([]),
+        planType === PlanType.WEEK
+          ? this.planStore.getUpcomingTasks()
           : Promise.resolve([]),
       ]);
 
@@ -69,6 +72,7 @@ export class ContextBuilderService {
         description: t.description,
         priority: t.priority,
       })),
+      upcomingTasks: upcomingTasks,
       recentCompletionRate: stats.completionRate,
       commonDeferrals: stats.commonDeferrals,
     };
@@ -172,18 +176,26 @@ export class ContextBuilderService {
   /**
    * Текущий план недели из БД
    */
-  private async getCurrentWeekPlan(): Promise<WeeklyPlanInput | undefined> {
-    // return this.planRepository.findOne({
-    //   where: { type: PlanType.WEEK, weekStart: getCurrentWeekStart() },
-    // });
-    return undefined;
+  private async getCurrentWeekPlan(): Promise<Partial<WeeklyPlanInput> | undefined> {
+    const plan = await this.planStore.getWeekPlan();
+    if (!plan) return undefined;
+    return {
+      mainFocus: plan.focusTitle,
+      strategicIntentions: plan.strategicIntentions || [],
+      checkpoints: plan.checkpoints as any || {},
+    };
   }
 
   /**
    * Текущий план месяца
    */
-  private async getCurrentMonthPlan(): Promise<MonthlyPlanInput | undefined> {
-    return undefined;
+  private async getCurrentMonthPlan(): Promise<Partial<MonthlyPlanInput> | undefined> {
+    const plan = await this.planStore.getMonthPlan();
+    if (!plan) return undefined;
+    return {
+      mainGoal: plan.focusTitle,
+      directions: plan.intentions as any || {},
+    };
   }
 
   /**
@@ -282,13 +294,26 @@ export class ContextBuilderService {
       sections.push(`## Часто переносимые задачи: ${ctx.commonDeferrals.join(', ')}`);
     }
 
-    // Предзапланированные задачи (ОБЯЗАТЕЛЬНО включить в план)
+    // Предзапланированные задачи на сегодня (ОБЯЗАТЕЛЬНО включить в план дня)
     if (ctx.scheduledTasks && ctx.scheduledTasks.length > 0) {
-      sections.push('## ⚡ ПРЕДЗАПЛАНИРОВАННЫЕ ЗАДАЧИ (ОБЯЗАТЕЛЬНО включить в план):');
+      sections.push('## ⚡ ПРЕДЗАПЛАНИРОВАННЫЕ ЗАДАЧИ НА СЕГОДНЯ (ОБЯЗАТЕЛЬНО включить в план):');
       for (const t of ctx.scheduledTasks) {
         let line = `- [${t.priority.toUpperCase()}] ${t.title}`;
         if (t.description) line += ` — ${t.description}`;
         sections.push(line);
+      }
+    }
+
+    // Все будущие задачи из БД (для плана недели — ОБЯЗАТЕЛЬНО включить по датам)
+    if (ctx.upcomingTasks && ctx.upcomingTasks.length > 0) {
+      sections.push('## ⚡ ЗАПЛАНИРОВАННЫЕ ЗАДАЧИ ИЗ БД (ОБЯЗАТЕЛЬНО включить в план по соответствующим дням):');
+      for (const dayGroup of ctx.upcomingTasks) {
+        sections.push(`### ${dayGroup.date} — ${dayGroup.focusTitle}`);
+        for (const t of dayGroup.tasks) {
+          let line = `- [${t.priority.toUpperCase()}] [${t.status}] ${t.title}`;
+          if (t.description) line += ` — ${t.description}`;
+          sections.push(line);
+        }
       }
     }
 

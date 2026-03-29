@@ -176,8 +176,8 @@ export interface PlannerContext {
   }>;
 
   // Текущие планы (для каскадирования)
-  currentMonthPlan?: MonthlyPlanInput;
-  currentWeekPlan?: WeeklyPlanInput;
+  currentMonthPlan?: Partial<MonthlyPlanInput>;
+  currentWeekPlan?: Partial<WeeklyPlanInput>;
 
   // Пользовательский ввод
   quickNotes?: string[];
@@ -189,6 +189,18 @@ export interface PlannerContext {
     title: string;
     description?: string;
     priority: string;
+  }>;
+
+  // Будущие задачи из БД (для плана недели)
+  upcomingTasks?: Array<{
+    date: string;
+    focusTitle: string;
+    tasks: Array<{
+      title: string;
+      description?: string;
+      priority: string;
+      status: string;
+    }>;
   }>;
 
   // История (для обучения)
