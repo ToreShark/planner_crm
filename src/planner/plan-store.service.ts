@@ -196,6 +196,42 @@ export class PlanStoreService {
   }
 
   /**
+   * Сохранить план недели в БД
+   */
+  async saveWeekPlan(plan: any): Promise<PlanEntity> {
+    const now = new Date();
+    // Понедельник текущей недели
+    const dayOfWeek = now.getDay();
+    const diff = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+    const monday = new Date(now);
+    monday.setDate(now.getDate() + diff);
+    const sunday = new Date(monday);
+    sunday.setDate(monday.getDate() + 6);
+
+    const startDate = monday.toISOString().split('T')[0];
+    const endDate = sunday.toISOString().split('T')[0];
+
+    // Проверяем нет ли уже плана на эту неделю
+    const existing = await this.planRepo.findOne({
+      where: { type: PlanType.WEEK, date: startDate },
+    });
+
+    const entity = existing || this.planRepo.create({
+      type: PlanType.WEEK,
+      date: startDate,
+    });
+
+    entity.dateEnd = endDate;
+    entity.focusTitle = plan.mainFocus || plan.weekFocus || '';
+    entity.strategicIntentions = plan.strategicIntentions || [];
+    entity.checkpoints = plan.checkpoints || {};
+    entity.risks = plan.risks || [];
+    entity.rawClaudeResponse = plan;
+
+    return this.planRepo.save(entity);
+  }
+
+  /**
    * Обновить итоги плана недели
    */
   async updatePlanResults(

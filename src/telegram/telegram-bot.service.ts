@@ -1042,6 +1042,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         mainFocus: w.mainFocus,
         quickNotes: allNotes,
       });
+      await this.planStore.saveWeekPlan(plan);
       await this.sendWeeklyPlan(ctx, plan);
     } catch (error) {
       this.logger.error('Week plan generation failed', error);
