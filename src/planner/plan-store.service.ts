@@ -50,7 +50,11 @@ export class PlanStoreService {
     for (const plan of plans) {
       const start = plan.date;
       const end = plan.dateEnd || start;
-      if (targetDate >= start && targetDate <= end) {
+      // Расширяем на +1 день чтобы воскресенье попадало в неделю Пн-Сб
+      const endPlus1 = new Date(end);
+      endPlus1.setDate(endPlus1.getDate() + 1);
+      const endExtended = endPlus1.toISOString().split('T')[0];
+      if (targetDate >= start && targetDate <= endExtended) {
         return plan;
       }
     }
