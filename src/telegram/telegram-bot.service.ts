@@ -119,10 +119,14 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
           '/thisweek — Посмотреть план недели\n' +
           '/history — Планы за последние 7 дней\n' +
           '/stats — Статистика и оплаты\n\n' +
+          '*Итоги:*\n' +
+          '/dayresults — Итоги дня\n' +
+          '/weekresults — Итоги недели\n' +
+          '/monthresults — Итоги месяца\n\n' +
           '*Управление:*\n' +
           '/status — Текущий прогресс\n' +
           '/replan — Перепланировать день\n' +
-          '/review — Итоги дня\n' +
+          '/review — AI-обзор дня (Claude)\n' +
           '/cancel — Отменить текущий диалог\n\n' +
           '💬 Просто напиши задачу — добавлю в план.',
         { parse_mode: 'Markdown' },
@@ -332,6 +336,59 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
           `💰 Оплаты: ${(stats.totalPayments / 1000).toFixed(0)}K тенге\n`,
         { parse_mode: 'Markdown' },
       );
+    });
+
+    // ==========================================
+    // ИТОГИ
+    // ==========================================
+
+    // /dayresults — итоги дня (сегодня или указанная дата)
+    this.bot.command('dayresults', async (ctx) => {
+      const dateArg = ctx.message.text.replace('/dayresults', '').trim();
+      const date = dateArg || new Date().toISOString().split('T')[0];
+      const plan = await this.planStore.getDayPlan(date);
+
+      if (!plan) {
+        await ctx.reply(`📅 На *${date}* плана нет.`, { parse_mode: 'Markdown' });
+        return;
+      }
+
+      await this.sendDayResults(ctx, plan);
+    });
+
+    // /weekresults — итоги недели
+    this.bot.command('weekresults', async (ctx) => {
+      const plan = await this.planStore.getWeekPlan();
+
+      if (!plan) {
+        await ctx.reply('📅 Плана недели нет.');
+        return;
+      }
+
+      // Собираем все дни этой недели
+      const startDate = plan.date;
+      const endDate = plan.dateEnd || plan.date;
+      const dayPlans = await this.planStore.getDayPlans(startDate, endDate);
+
+      await this.sendWeekResults(ctx, plan, dayPlans);
+    });
+
+    // /monthresults — итоги месяца
+    this.bot.command('monthresults', async (ctx) => {
+      const now = new Date();
+      const monthStart = now.toISOString().slice(0, 7) + '-01';
+      const monthEnd = now.toISOString().split('T')[0];
+
+      const dayPlans = await this.planStore.getDayPlans(monthStart, monthEnd);
+      const weekPlan = await this.planStore.getWeekPlan();
+      const monthPlan = await this.planStore.getMonthPlan();
+
+      if (dayPlans.length === 0) {
+        await ctx.reply('📅 Нет данных за этот месяц.');
+        return;
+      }
+
+      await this.sendMonthResults(ctx, dayPlans, weekPlan, monthPlan);
     });
   }
 
@@ -1290,6 +1347,235 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   // -------------------------------------------------------
   // Утилиты
   // -------------------------------------------------------
+
+  // -------------------------------------------------------
+  // Итоги дня / недели / месяца
+  // -------------------------------------------------------
+
+  private async sendDayResults(ctx: Context, plan: PlanEntity) {
+    const tasks = plan.tasks || [];
+    const done = tasks.filter((t) => t.status === 'done');
+    const deferred = tasks.filter((t) => t.status === 'deferred');
+    const cancelled = tasks.filter((t) => t.status === 'cancelled');
+    const pending = tasks.filter((t) => t.status === 'pending' || t.status === 'in_progress');
+    const pct = tasks.length > 0 ? Math.round((done.length / tasks.length) * 100) : 0;
+
+    const payments = plan.payments || [];
+    const payReceived = payments.filter((p) => p.received);
+    const payTotal = payReceived.reduce((s, p) => s + p.amount, 0);
+
+    const lines: string[] = [];
+    lines.push(`🌙 *Итоги дня — ${plan.date}*\n`);
+    lines.push(`🎯 *Фокус:* ${plan.focusTitle}\n`);
+    lines.push(`${this.progressBar(pct)} *${pct}%* (${done.length}/${tasks.length})\n`);
+
+    if (done.length > 0) {
+      lines.push('✅ *Выполнено:*');
+      done.forEach((t) => lines.push(`• ${t.title}`));
+      lines.push('');
+    }
+
+    if (deferred.length > 0) {
+      lines.push('➡️ *Перенесено:*');
+      deferred.forEach((t) => {
+        lines.push(`• ${t.title}${t.deferredReason ? ` _(${t.deferredReason})_` : ''}`);
+      });
+      lines.push('');
+    }
+
+    if (pending.length > 0) {
+      lines.push('⬜ *Не завершено:*');
+      pending.forEach((t) => lines.push(`• ${t.title}`));
+      lines.push('');
+    }
+
+    if (payReceived.length > 0) {
+      lines.push(`💰 *Оплаты: ${(payTotal / 1000).toFixed(0)}K тенге*`);
+      payReceived.forEach((p) =>
+        lines.push(`• ${p.clientName} — ${p.description} (${(p.amount / 1000).toFixed(0)}K)`),
+      );
+      lines.push('');
+    }
+
+    if (plan.results) {
+      if (plan.results.wins && plan.results.wins.length > 0) {
+        lines.push('🔥 *Победы:*');
+        plan.results.wins.forEach((w) => lines.push(`• ${w}`));
+      }
+      if (plan.results.mistakes && plan.results.mistakes.length > 0) {
+        lines.push('\n❌ *Ошибки/уроки:*');
+        plan.results.mistakes.forEach((m) => lines.push(`• ${m}`));
+      }
+    }
+
+    if (plan.comment) lines.push(`\n💬 _${plan.comment}_`);
+
+    await this.sendLongMessage(ctx, lines.join('\n'));
+  }
+
+  private async sendWeekResults(ctx: Context, weekPlan: PlanEntity, dayPlans: PlanEntity[]) {
+    const lines: string[] = [];
+
+    lines.push(`📅 *Итоги недели* (${weekPlan.date} – ${weekPlan.dateEnd || '...'})\n`);
+    lines.push(`🎯 *Фокус:* ${weekPlan.focusTitle}\n`);
+
+    // Общая статистика
+    const allTasks = dayPlans.flatMap((p) => p.tasks || []);
+    const allDone = allTasks.filter((t) => t.status === 'done');
+    const allDeferred = allTasks.filter((t) => t.status === 'deferred');
+    const pct = allTasks.length > 0 ? Math.round((allDone.length / allTasks.length) * 100) : 0;
+
+    const allPayments = dayPlans.flatMap((p) => p.payments || []);
+    const payTotal = allPayments.filter((p) => p.received).reduce((s, p) => s + p.amount, 0);
+
+    lines.push(`${this.progressBar(pct)} *${pct}%* (${allDone.length}/${allTasks.length})\n`);
+    if (payTotal > 0) lines.push(`💰 *Оплаты за неделю:* ${(payTotal / 1000).toFixed(0)}K тенге\n`);
+
+    // По дням
+    lines.push('*По дням:*');
+    for (const day of dayPlans) {
+      const tasks = day.tasks || [];
+      const done = tasks.filter((t) => t.status === 'done').length;
+      const total = tasks.length;
+      const dayPct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+      const payments = day.payments || [];
+      const dayPay = payments.filter((p) => p.received).reduce((s, p) => s + p.amount, 0);
+
+      lines.push(
+        `*${day.date}* ${this.progressBar(dayPct)} ${dayPct}%` +
+          (dayPay > 0 ? ` 💰${(dayPay / 1000).toFixed(0)}K` : ''),
+      );
+      lines.push(`  _${day.focusTitle}_`);
+    }
+    lines.push('');
+
+    // Задачи недели
+    const weekTasks = weekPlan.tasks || [];
+    if (weekTasks.length > 0) {
+      const wDone = weekTasks.filter((t) => t.status === 'done');
+      const wDeferred = weekTasks.filter((t) => t.status === 'deferred');
+      const wPending = weekTasks.filter((t) => t.status === 'pending' || t.status === 'in_progress');
+
+      if (wDone.length > 0) {
+        lines.push('✅ *Выполнены задачи недели:*');
+        wDone.forEach((t) => lines.push(`• ${CATEGORY_EMOJI[t.category] || ''} ${t.title}`));
+        lines.push('');
+      }
+      if (wDeferred.length > 0) {
+        lines.push('➡️ *Перенесено:*');
+        wDeferred.forEach((t) => lines.push(`• ${CATEGORY_EMOJI[t.category] || ''} ${t.title}`));
+        lines.push('');
+      }
+      if (wPending.length > 0) {
+        lines.push('⬜ *Не завершено:*');
+        wPending.forEach((t) => lines.push(`• ${CATEGORY_EMOJI[t.category] || ''} ${t.title}`));
+        lines.push('');
+      }
+    }
+
+    // Итоги недели из results
+    if (weekPlan.results) {
+      if (weekPlan.results.wins && weekPlan.results.wins.length > 0) {
+        lines.push('🔥 *Победы:*');
+        weekPlan.results.wins.forEach((w) => lines.push(`• ${w}`));
+      }
+      if (weekPlan.results.mistakes && weekPlan.results.mistakes.length > 0) {
+        lines.push('\n❌ *Ошибки:*');
+        weekPlan.results.mistakes.forEach((m) => lines.push(`• ${m}`));
+      }
+      if (weekPlan.results.nextPriorities && weekPlan.results.nextPriorities.length > 0) {
+        lines.push('\n🎯 *Приоритеты на след. неделю:*');
+        weekPlan.results.nextPriorities.forEach((p) => lines.push(`• ${p}`));
+      }
+    }
+
+    await this.sendLongMessage(ctx, lines.join('\n'));
+  }
+
+  private async sendMonthResults(
+    ctx: Context,
+    dayPlans: PlanEntity[],
+    weekPlan: PlanEntity | null,
+    monthPlan: PlanEntity | null,
+  ) {
+    const lines: string[] = [];
+    const monthName = monthPlan?.focusTitle || new Date().toLocaleString('ru-RU', { month: 'long' });
+
+    lines.push(`📆 *Итоги месяца — ${monthName}*\n`);
+
+    // Общая статистика
+    const allTasks = dayPlans.flatMap((p) => p.tasks || []);
+    const allDone = allTasks.filter((t) => t.status === 'done');
+    const pct = allTasks.length > 0 ? Math.round((allDone.length / allTasks.length) * 100) : 0;
+
+    const allPayments = dayPlans.flatMap((p) => p.payments || []);
+    const payTotal = allPayments.filter((p) => p.received).reduce((s, p) => s + p.amount, 0);
+
+    lines.push(`${this.progressBar(pct)} *${pct}%* выполнение`);
+    lines.push(`📋 Всего задач: ${allTasks.length} | Выполнено: ${allDone.length}`);
+    lines.push(`📅 Дней с планами: ${dayPlans.length}`);
+    lines.push(`💰 *Оплаты: ${(payTotal / 1000).toFixed(0)}K тенге* (${allPayments.filter((p) => p.received).length} шт)\n`);
+
+    // По категориям
+    const categories = ['work', 'tech', 'marketing', 'health', 'personal'];
+    const catLabels: Record<string, string> = {
+      work: '💼 Работа',
+      tech: '🤖 Тех',
+      marketing: '📈 Маркетинг',
+      health: '💪 Здоровье',
+      personal: '🧠 Личное',
+    };
+
+    lines.push('*По категориям:*');
+    for (const cat of categories) {
+      const catTasks = allTasks.filter((t) => t.category === cat);
+      const catDone = catTasks.filter((t) => t.status === 'done').length;
+      const catTotal = catTasks.length;
+      if (catTotal > 0) {
+        const catPct = Math.round((catDone / catTotal) * 100);
+        lines.push(`${catLabels[cat]}: ${catDone}/${catTotal} (${catPct}%)`);
+      }
+    }
+    lines.push('');
+
+    // Топ оплат
+    if (allPayments.length > 0) {
+      lines.push('💰 *Детализация оплат:*');
+      const sorted = [...allPayments].filter((p) => p.received).sort((a, b) => b.amount - a.amount);
+      for (const p of sorted.slice(0, 10)) {
+        lines.push(`• ${p.clientName} — ${p.description} (${(p.amount / 1000).toFixed(0)}K)`);
+      }
+      lines.push('');
+    }
+
+    // Часто переносимые
+    const deferred = allTasks.filter((t) => t.status === 'deferred');
+    if (deferred.length > 0) {
+      lines.push('➡️ *Чаще всего переносилось:*');
+      const deferCounts: Record<string, number> = {};
+      for (const t of deferred) {
+        deferCounts[t.title] = (deferCounts[t.title] || 0) + 1;
+      }
+      const sorted = Object.entries(deferCounts).sort((a, b) => b[1] - a[1]);
+      for (const [title, count] of sorted.slice(0, 5)) {
+        lines.push(`• ${title}${count > 1 ? ` (×${count})` : ''}`);
+      }
+      lines.push('');
+    }
+
+    // По дням — прогресс
+    lines.push('📊 *По дням:*');
+    for (const day of dayPlans) {
+      const tasks = day.tasks || [];
+      const done = tasks.filter((t) => t.status === 'done').length;
+      const total = tasks.length;
+      const dayPct = total > 0 ? Math.round((done / total) * 100) : 0;
+      lines.push(`${day.date} ${this.progressBar(dayPct)} ${dayPct}%`);
+    }
+
+    await this.sendLongMessage(ctx, lines.join('\n'));
+  }
 
   private async sendLongMessage(ctx: Context, text: string) {
     let remaining = text;
