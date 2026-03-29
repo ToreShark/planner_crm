@@ -304,13 +304,17 @@ export class ContextBuilderService {
       }
     }
 
-    // Все будущие задачи из БД (для плана недели — ОБЯЗАТЕЛЬНО включить по датам)
+    // Все будущие задачи из БД (для плана недели)
     if (ctx.upcomingTasks && ctx.upcomingTasks.length > 0) {
-      sections.push('## ⚡ ЗАПЛАНИРОВАННЫЕ ЗАДАЧИ ИЗ БД (ОБЯЗАТЕЛЬНО включить в план по соответствующим дням):');
+      const dayNames: Record<number, string> = { 0: 'Вс', 1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб' };
+      sections.push('## ⚡ ЗАДАЧИ ИЗ БД — ПРИВЯЗАНЫ К ДАТАМ! НЕ ПЕРЕНОСИТЬ!');
+      sections.push('Каждая задача ДОЛЖНА быть в плане на тот день недели, который соответствует её дате.');
       for (const dayGroup of ctx.upcomingTasks) {
-        sections.push(`### ${dayGroup.date} — ${dayGroup.focusTitle}`);
+        const d = new Date(dayGroup.date);
+        const dayName = dayNames[d.getDay()];
+        sections.push(`\n### ${dayGroup.date} (${dayName}) — ${dayGroup.focusTitle}`);
         for (const t of dayGroup.tasks) {
-          let line = `- [${t.priority.toUpperCase()}] [${t.status}] ${t.title}`;
+          let line = `- ⚡ [${dayName}] [${t.priority.toUpperCase()}] ${t.title}`;
           if (t.description) line += ` — ${t.description}`;
           sections.push(line);
         }
