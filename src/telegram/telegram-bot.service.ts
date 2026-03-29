@@ -1199,7 +1199,19 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
   private async addTaskFromText(ctx: Context, text: string) {
     if (!this.currentPlan) {
-      await this.generateAndSendPlan(ctx, { quickNotes: [text] });
+      // Сохраняем как задачу на сегодня в БД
+      const today = new Date().toISOString().split('T')[0];
+      const plan = await this.planStore.getOrCreateDayPlan(today);
+      const category = this.detectCategory(text);
+      await this.planStore.addTaskToPlan(plan.id, {
+        title: text,
+        category,
+        priority: 'medium',
+      });
+      await ctx.reply(
+        `➕ Задача сохранена на *${today}*:\n${CATEGORY_EMOJI[category] || '📌'} ${text}\n\n_Используй /plan чтобы сгенерировать полный план дня._`,
+        { parse_mode: 'Markdown' },
+      );
       return;
     }
 
@@ -1240,8 +1252,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
   private isSmartTask(text: string): boolean {
     const lower = text.toLowerCase();
-    const hasDateWords = /завтра|послезавтра|понедельник|вторник|сред[уа]|четверг|пятниц|суббот|воскресень|следующ|через\s+\d|на\s+недел|\d{1,2}[\/.]\d{1,2}/.test(lower);
-    const isLongEnough = text.length > 30;
+    const hasDateWords = /завтра|послезавтра|понедельник|вторник|сред[уа]|четверг|пятниц|суббот|воскресень|следующ|через\s+\d|на\s+недел|\d{1,2}[\/.]\d{1,2}|\d{1,2}\s*(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)/.test(lower);
+    const isLongEnough = text.length > 20;
     return hasDateWords && isLongEnough;
   }
 
