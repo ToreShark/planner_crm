@@ -10,7 +10,9 @@ import { ConfigService } from '@nestjs/config';
 import { Telegraf, Markup, Context } from 'telegraf';
 import { InlineKeyboardButton } from 'telegraf/typings/core/types/typegram';
 import { ClaudePlannerService } from '../planner/claude-planner.service';
+import { PlanStoreService } from '../planner/plan-store.service';
 import { DailyPlanOutput, TaskItem, TaskCategory, TaskStatus, TaskPriority } from '../planner/types';
+import { PlanEntity } from '../planner/entities';
 
 // Emoji маппинг
 const CATEGORY_EMOJI: Record<string, string> = {
@@ -60,6 +62,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   constructor(
     private readonly configService: ConfigService,
     private readonly plannerService: ClaudePlannerService,
+    private readonly planStore: PlanStoreService,
   ) {
     const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
     if (!token) throw new Error('TELEGRAM_BOT_TOKEN not set');
@@ -108,9 +111,14 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       await ctx.reply(
         '🗓 *AI Планировщик PrimeLegal*\n\n' +
           '*Планирование (пошагово):*\n' +
-          '/plan — План на сегодня\n' +
-          '/week — План на неделю\n' +
-          '/month — План на месяц\n\n' +
+          '/plan — Создать план на сегодня\n' +
+          '/week — Создать план на неделю\n' +
+          '/month — Создать план на месяц\n\n' +
+          '*Просмотр:*\n' +
+          '/today — Посмотреть план на сегодня\n' +
+          '/thisweek — Посмотреть план недели\n' +
+          '/history — Планы за последние 7 дней\n' +
+          '/stats — Статистика и оплаты\n\n' +
           '*Управление:*\n' +
           '/status — Текущий прогресс\n' +
           '/replan — Перепланировать день\n' +
@@ -243,6 +251,87 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         return;
       }
       await this.sendDayReview(ctx);
+    });
+
+    // ==========================================
+    // ПРОСМОТР ПЛАНОВ ИЗ БД
+    // ==========================================
+
+    // /today — план на сегодня из БД
+    this.bot.command('today', async (ctx) => {
+      const today = new Date().toISOString().split('T')[0];
+      const plan = await this.planStore.getDayPlan(today);
+
+      if (!plan) {
+        await ctx.reply(
+          `📅 На *${today}* плана нет.\n\nИспользуй /plan чтобы создать.`,
+          { parse_mode: 'Markdown' },
+        );
+        return;
+      }
+
+      await this.sendStoredDayPlan(ctx, plan);
+    });
+
+    // /thisweek — план текущей недели из БД
+    this.bot.command('thisweek', async (ctx) => {
+      const plan = await this.planStore.getWeekPlan();
+
+      if (!plan) {
+        await ctx.reply(
+          '📅 Плана недели нет.\n\nИспользуй /week чтобы создать.',
+          { parse_mode: 'Markdown' },
+        );
+        return;
+      }
+
+      await this.sendStoredWeekPlan(ctx, plan);
+    });
+
+    // /history — последние 7 дней
+    this.bot.command('history', async (ctx) => {
+      const plans = await this.planStore.getRecentPlans(7);
+
+      if (plans.length === 0) {
+        await ctx.reply('📋 Нет сохранённых планов.');
+        return;
+      }
+
+      const lines: string[] = ['📋 *Последние планы:*\n'];
+
+      for (const plan of plans) {
+        const tasks = plan.tasks || [];
+        const done = tasks.filter((t) => t.status === 'done').length;
+        const total = tasks.length;
+        const pct = total > 0 ? Math.round((done / total) * 100) : 0;
+
+        const payments = plan.payments || [];
+        const payTotal = payments.filter((p) => p.received).reduce((s, p) => s + p.amount, 0);
+
+        lines.push(
+          `*${plan.date}* — ${plan.focusTitle}` +
+            `\n  ${this.progressBar(pct)} ${pct}% (${done}/${total})` +
+            (payTotal > 0 ? ` 💰 ${(payTotal / 1000).toFixed(0)}K` : ''),
+        );
+        lines.push('');
+      }
+
+      await this.sendLongMessage(ctx, lines.join('\n'));
+    });
+
+    // /stats — статистика
+    this.bot.command('stats', async (ctx) => {
+      const stats = await this.planStore.getCompletionStats(7);
+
+      const pct = Math.round(stats.completionRate * 100);
+
+      await ctx.reply(
+        `📊 *Статистика за 7 дней*\n\n` +
+          `${this.progressBar(pct)} *${pct}%* выполнение\n\n` +
+          `✅ Выполнено: ${stats.completedTasks} из ${stats.totalTasks}\n` +
+          `💰 Оплаты: ${(stats.totalPayments / 1000).toFixed(0)}K тенге\n`,
+        { parse_mode: 'Markdown' },
+      );
     });
   }
 
@@ -1213,5 +1302,138 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       await ctx.reply(remaining.slice(0, cut), { parse_mode: 'Markdown' });
       remaining = remaining.slice(cut);
     }
+  }
+
+  // -------------------------------------------------------
+  // Отображение планов из БД
+  // -------------------------------------------------------
+
+  private async sendStoredDayPlan(ctx: Context, plan: PlanEntity) {
+    const lines: string[] = [];
+
+    lines.push(`🗓 *План на ${plan.date}*\n`);
+    lines.push(`🎯 *Фокус:* ${plan.focusTitle}\n`);
+
+    if (plan.intentions) {
+      lines.push('*Намерения:*');
+      if (plan.intentions.main) lines.push(`1️⃣ ${plan.intentions.main}`);
+      if (plan.intentions.secondary) lines.push(`2️⃣ ${plan.intentions.secondary}`);
+      if (plan.intentions.recovery) lines.push(`3️⃣ ${plan.intentions.recovery}`);
+      lines.push('');
+    }
+
+    // Задачи
+    if (plan.tasks && plan.tasks.length > 0) {
+      lines.push('*Задачи:*');
+      for (const task of plan.tasks.sort((a, b) => a.sortOrder - b.sortOrder)) {
+        const status = STATUS_EMOJI[task.status] || '⬜';
+        const priority = PRIORITY_EMOJI[task.priority] || '';
+        const cat = CATEGORY_EMOJI[task.category] || '';
+        lines.push(`${status} ${priority}${cat} ${task.title}`);
+        if (task.deferredReason) lines.push(`  _→ ${task.deferredReason}_`);
+      }
+      lines.push('');
+    }
+
+    // Оплаты
+    if (plan.payments && plan.payments.length > 0) {
+      lines.push('💰 *Оплаты:*');
+      let total = 0;
+      for (const p of plan.payments) {
+        const check = p.received ? '✅' : '⬜';
+        lines.push(`${check} ${p.clientName} — ${p.description} (${(p.amount / 1000).toFixed(0)}K ${p.currency})`);
+        if (p.received) total += p.amount;
+      }
+      lines.push(`\n*Итого:* ${(total / 1000).toFixed(0)}K тенге`);
+      lines.push('');
+    }
+
+    // Итоги
+    if (plan.results) {
+      if (plan.results.wins && plan.results.wins.length > 0) {
+        lines.push('✅ *Победы:*');
+        plan.results.wins.forEach((w) => lines.push(`• ${w}`));
+      }
+      if (plan.results.mistakes && plan.results.mistakes.length > 0) {
+        lines.push('❌ *Не выполнено:*');
+        plan.results.mistakes.forEach((m) => lines.push(`• ${m}`));
+      }
+    }
+
+    if (plan.comment) {
+      lines.push(`\n💬 _${plan.comment}_`);
+    }
+
+    await this.sendLongMessage(ctx, lines.join('\n'));
+  }
+
+  private async sendStoredWeekPlan(ctx: Context, plan: PlanEntity) {
+    const lines: string[] = [];
+
+    lines.push(`📅 *План недели* (${plan.date} – ${plan.dateEnd || '...'})\n`);
+    lines.push(`🎯 *Фокус:* ${plan.focusTitle}\n`);
+
+    // Стратегические намерения
+    if (plan.strategicIntentions && plan.strategicIntentions.length > 0) {
+      lines.push('*Стратегические намерения:*');
+      plan.strategicIntentions.forEach((s, i) => lines.push(`${i + 1}) ${s}`));
+      lines.push('');
+    }
+
+    // Задачи по категориям
+    if (plan.tasks && plan.tasks.length > 0) {
+      const categories = ['work', 'tech', 'marketing', 'health', 'personal'];
+      const catLabels: Record<string, string> = {
+        work: '💼 Работа',
+        tech: '🤖 Тех',
+        marketing: '📈 Маркетинг',
+        health: '💪 Здоровье',
+        personal: '🧠 Личное',
+      };
+
+      for (const cat of categories) {
+        const catTasks = plan.tasks.filter((t) => t.category === cat);
+        if (catTasks.length > 0) {
+          lines.push(`\n*${catLabels[cat]}:*`);
+          for (const t of catTasks) {
+            const status = STATUS_EMOJI[t.status] || '⬜';
+            lines.push(`${status} ${t.title}`);
+          }
+        }
+      }
+      lines.push('');
+    }
+
+    // Контрольные точки
+    if (plan.checkpoints) {
+      lines.push('📋 *По дням:*');
+      for (const [day, text] of Object.entries(plan.checkpoints)) {
+        lines.push(`*${day}* — ${text}`);
+      }
+      lines.push('');
+    }
+
+    // Риски
+    if (plan.risks && plan.risks.length > 0) {
+      lines.push('⚠️ *Риски:*');
+      for (const r of plan.risks) {
+        lines.push(`• ${r.risk}\n  → ${r.mitigation}`);
+      }
+    }
+
+    // Итоги
+    if (plan.results) {
+      lines.push('');
+      if (plan.results.wins && plan.results.wins.length > 0) {
+        lines.push('✅ *Победы:*');
+        plan.results.wins.forEach((w) => lines.push(`• ${w}`));
+      }
+      if (plan.results.mistakes && plan.results.mistakes.length > 0) {
+        lines.push('❌ *Ошибки:*');
+        plan.results.mistakes.forEach((m) => lines.push(`• ${m}`));
+      }
+    }
+
+    await this.sendLongMessage(ctx, lines.join('\n'));
   }
 }
