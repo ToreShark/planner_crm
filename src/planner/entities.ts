@@ -29,13 +29,13 @@ export class PlanEntity {
 
   @Column({ type: 'date' })
   @Index()
-  date: string; // Дата плана (для дня — конкретная дата, для недели — начало недели)
+  date: string;
 
-  @Column({ type: 'date', nullable: true })
-  dateEnd?: string; // Для недели/месяца — конец периода
+  @Column({ name: 'date_end', type: 'date', nullable: true })
+  dateEnd?: string;
 
-  @Column({ type: 'text' })
-  focusTitle: string; // Фокус дня / недели / месяца
+  @Column({ name: 'focus_title', type: 'text' })
+  focusTitle: string;
 
   @Column({ type: 'jsonb', nullable: true })
   intentions?: {
@@ -44,25 +44,23 @@ export class PlanEntity {
     recovery?: string;
   };
 
-  @Column({ type: 'jsonb', nullable: true })
-  strategicIntentions?: string[]; // Для недели
+  @Column({ name: 'strategic_intentions', type: 'jsonb', nullable: true })
+  strategicIntentions?: string[];
 
   @Column({ type: 'jsonb', nullable: true })
-  checkpoints?: Record<string, string>; // Контрольные точки по дням
+  checkpoints?: Record<string, string>;
 
   @Column({ type: 'jsonb', nullable: true })
   risks?: Array<{ risk: string; mitigation: string }>;
 
-  @Column({ type: 'jsonb', nullable: true })
-  rawClaudeResponse?: Record<string, unknown>; // Полный ответ Claude для отладки
+  @Column({ name: 'raw_claude_response', type: 'jsonb', nullable: true })
+  rawClaudeResponse?: Record<string, unknown>;
 
-  @Column({ type: 'smallint', nullable: true })
+  @Column({ name: 'energy_level', type: 'smallint', nullable: true })
   energyLevel?: number;
 
   @Column({ type: 'varchar', length: 50, nullable: true })
   place?: string;
-
-  // --- Итоги ---
 
   @Column({ type: 'jsonb', nullable: true })
   results?: {
@@ -74,8 +72,6 @@ export class PlanEntity {
 
   @Column({ type: 'text', nullable: true })
   comment?: string;
-
-  // --- Метрики ---
 
   @Column({ type: 'jsonb', nullable: true })
   metrics?: {
@@ -95,10 +91,10 @@ export class PlanEntity {
   @OneToMany(() => PaymentEntity, (payment) => payment.plan, { cascade: true })
   payments: PaymentEntity[];
 
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }
 
@@ -132,31 +128,31 @@ export class TaskEntity {
   @Column({ type: 'enum', enum: TaskStatus, default: TaskStatus.PENDING })
   status: TaskStatus;
 
-  @Column({ type: 'smallint', nullable: true })
+  @Column({ name: 'estimated_minutes', type: 'smallint', nullable: true })
   estimatedMinutes?: number;
 
-  @Column({ type: 'varchar', length: 20, nullable: true })
-  suggestedTime?: string; // "09:00-10:00"
+  @Column({ name: 'suggested_time', type: 'varchar', length: 20, nullable: true })
+  suggestedTime?: string;
 
-  @Column({ type: 'varchar', length: 100, nullable: true })
-  linkedCaseId?: string; // ID дела из CRM
+  @Column({ name: 'linked_case_id', type: 'varchar', length: 100, nullable: true })
+  linkedCaseId?: string;
 
-  @Column({ type: 'boolean', default: false })
+  @Column({ name: 'is_recurring', type: 'boolean', default: false })
   isRecurring: boolean;
 
-  @Column({ type: 'smallint', default: 0 })
+  @Column({ name: 'sort_order', type: 'smallint', default: 0 })
   sortOrder: number;
 
-  @Column({ type: 'timestamp', nullable: true })
+  @Column({ name: 'completed_at', type: 'timestamp', nullable: true })
   completedAt?: Date;
 
-  @Column({ type: 'text', nullable: true })
-  deferredReason?: string; // Почему перенесено
+  @Column({ name: 'deferred_reason', type: 'text', nullable: true })
+  deferredReason?: string;
 
-  @CreateDateColumn()
+  @CreateDateColumn({ name: 'created_at' })
   createdAt: Date;
 
-  @UpdateDateColumn()
+  @UpdateDateColumn({ name: 'updated_at' })
   updatedAt: Date;
 }
 
@@ -174,10 +170,10 @@ export class TimeBlockEntity {
   @Column({ name: 'plan_id', type: 'uuid' })
   planId: string;
 
-  @Column({ type: 'varchar', length: 10 })
+  @Column({ name: 'start_time', type: 'varchar', length: 10 })
   startTime: string;
 
-  @Column({ type: 'varchar', length: 10 })
+  @Column({ name: 'end_time', type: 'varchar', length: 10 })
   endTime: string;
 
   @Column({ type: 'varchar', length: 200 })
@@ -186,7 +182,7 @@ export class TimeBlockEntity {
   @Column({ type: 'enum', enum: TaskCategory })
   category: TaskCategory;
 
-  @Column({ type: 'jsonb', default: [] })
+  @Column({ name: 'task_ids', type: 'jsonb', default: [] })
   taskIds: string[];
 }
 
@@ -204,7 +200,7 @@ export class PaymentEntity {
   @Column({ name: 'plan_id', type: 'uuid' })
   planId: string;
 
-  @Column({ type: 'varchar', length: 200 })
+  @Column({ name: 'client_name', type: 'varchar', length: 200 })
   clientName: string;
 
   @Column({ type: 'varchar', length: 500 })
