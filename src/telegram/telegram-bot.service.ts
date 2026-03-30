@@ -159,6 +159,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
           '/month — Создать план на месяц\n\n' +
           '*Просмотр:*\n' +
           '/today — Посмотреть план на сегодня\n' +
+          '/tomorrow — Посмотреть план на завтра\n' +
           '/thisweek — Посмотреть план недели\n' +
           '/history — Планы за последние 7 дней\n' +
           '/stats — Статистика и оплаты\n\n' +
@@ -308,9 +309,21 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     // ПРОСМОТР ПЛАНОВ ИЗ БД
     // ==========================================
 
-    // /today — план на сегодня из БД (или из контрольной точки недели)
+    // /today — план на сегодня (память → БД → контрольная точка недели)
     this.bot.command('today', async (ctx) => {
       const today = new Date().toISOString().split('T')[0];
+
+      // Сначала проверяем план в памяти (сгенерированный Claude)
+      if (this.currentPlan && this.currentPlan.date === today) {
+        const message = this.formatDailyPlan(this.currentPlan);
+        const keyboard = this.getPlanKeyboard(this.currentPlan);
+        await ctx.reply(message, {
+          parse_mode: 'Markdown',
+          ...Markup.inlineKeyboard(keyboard),
+        });
+        return;
+      }
+
       const plan = await this.planStore.getDayPlan(today);
 
       if (plan) {
@@ -339,6 +352,44 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
       await ctx.reply(
         `📅 На *${today}* плана нет.\n\nИспользуй /plan чтобы создать.`,
+        { parse_mode: 'Markdown' },
+      );
+    });
+
+    // /tomorrow — план на завтра (БД → контрольная точка недели)
+    this.bot.command('tomorrow', async (ctx) => {
+      const tmr = new Date();
+      tmr.setDate(tmr.getDate() + 1);
+      const tomorrowStr = tmr.toISOString().split('T')[0];
+
+      const plan = await this.planStore.getDayPlan(tomorrowStr);
+
+      if (plan) {
+        await this.sendStoredDayPlan(ctx, plan);
+        return;
+      }
+
+      // Нет отдельного плана — ищем контрольную точку в плане недели
+      const weekPlan = await this.planStore.getWeekPlan(tomorrowStr);
+      if (weekPlan && weekPlan.checkpoints) {
+        const days = ['Вс', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб'];
+        const dayShort = days[tmr.getDay()];
+        const checkpoint = weekPlan.checkpoints[dayShort];
+
+        if (checkpoint) {
+          const lines: string[] = [];
+          lines.push(`🗓 *${tomorrowStr}* (${dayShort}) — завтра\n`);
+          lines.push(`🎯 *Фокус недели:* ${weekPlan.focusTitle}\n`);
+          lines.push(`📋 *На завтра (из плана недели):*`);
+          lines.push(`${checkpoint}\n`);
+          lines.push(`_Отдельного плана нет. Используй /plan завтра чтобы создать детальный._`);
+          await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+          return;
+        }
+      }
+
+      await ctx.reply(
+        `📅 На *${tomorrowStr}* (завтра) плана нет.\n\nЗадачи можно добавить текстом, например:\n_"Встреча с Анарой завтра в 10:00"_`,
         { parse_mode: 'Markdown' },
       );
     });
@@ -1103,6 +1154,12 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   async sendMorningPlan() {
     try {
       this.currentPlan = await this.plannerService.generateDailyPlan();
+      // Сохраняем полный план в БД для /today
+      try {
+        await this.planStore.saveDayPlan(this.currentPlan);
+      } catch (e) {
+        this.logger.error('Failed to save morning plan to DB', e);
+      }
       const message = this.formatDailyPlan(this.currentPlan);
       const keyboard = this.getPlanKeyboard(this.currentPlan);
       await this.bot.telegram.sendMessage(this.allowedUserId, message, {
@@ -1221,6 +1278,12 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       parse_mode: 'Markdown',
       ...Markup.inlineKeyboard(keyboard),
     });
+    // Сохраняем полный план в БД для /today
+    try {
+      await this.planStore.saveDayPlan(this.currentPlan);
+    } catch (e) {
+      this.logger.error('Failed to save day plan to DB', e);
+    }
   }
 
   private formatDailyPlan(plan: DailyPlanOutput): string {
@@ -1970,6 +2033,16 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       lines.push('');
     }
 
+    // Расписание (timeBlocks)
+    if (plan.timeBlocks && plan.timeBlocks.length > 0) {
+      lines.push('*Расписание:*');
+      for (const block of plan.timeBlocks) {
+        const emoji = CATEGORY_EMOJI[block.category] || '📌';
+        lines.push(`\`${block.startTime}–${block.endTime}\` ${emoji} ${block.label}`);
+      }
+      lines.push('');
+    }
+
     // Задачи
     if (plan.tasks && plan.tasks.length > 0) {
       lines.push('*Задачи:*');
@@ -1977,7 +2050,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         const status = STATUS_EMOJI[task.status] || '⬜';
         const priority = PRIORITY_EMOJI[task.priority] || '';
         const cat = CATEGORY_EMOJI[task.category] || '';
-        lines.push(`${status} ${priority}${cat} ${task.title}`);
+        const time = task.suggestedTime ? ` \`${task.suggestedTime}\`` : '';
+        lines.push(`${status} ${priority}${cat} ${task.title}${time}`);
         if (task.deferredReason) lines.push(`  _→ ${task.deferredReason}_`);
       }
       lines.push('');
@@ -1993,6 +2067,15 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         if (p.received) total += p.amount;
       }
       lines.push(`\n*Итого:* ${(total / 1000).toFixed(0)}K тенге`);
+      lines.push('');
+    }
+
+    // Риски
+    if (plan.risks && plan.risks.length > 0) {
+      lines.push('⚠️ *Риски:*');
+      for (const r of plan.risks) {
+        lines.push(`• ${r.risk}\n  → ${r.mitigation}`);
+      }
       lines.push('');
     }
 
@@ -2012,7 +2095,39 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       lines.push(`\n💬 _${plan.comment}_`);
     }
 
-    await this.sendLongMessage(ctx, lines.join('\n'));
+    // Восстанавливаем currentPlan из БД для кнопок и прогресса
+    const tasks = (plan.tasks || []).map((t) => ({
+      id: t.id,
+      title: t.title,
+      description: t.description,
+      category: t.category,
+      priority: t.priority,
+      status: t.status,
+      estimatedMinutes: t.estimatedMinutes,
+      suggestedTime: t.suggestedTime,
+    }));
+
+    this.currentPlan = {
+      id: plan.id,
+      date: plan.date,
+      focusOfDay: plan.focusTitle,
+      intentions: plan.intentions || { main: '', secondary: '', recovery: '' },
+      tasks,
+      timeBlocks: (plan.timeBlocks || []).map((tb) => ({
+        startTime: tb.startTime,
+        endTime: tb.endTime,
+        label: tb.label,
+        category: tb.category,
+        taskIds: tb.taskIds || [],
+      })),
+      risks: plan.risks || [],
+    };
+
+    const keyboard = this.getPlanKeyboard(this.currentPlan);
+    await ctx.reply(lines.join('\n'), {
+      parse_mode: 'Markdown',
+      ...Markup.inlineKeyboard(keyboard),
+    });
   }
 
   private async sendStoredWeekPlan(ctx: Context, plan: PlanEntity) {

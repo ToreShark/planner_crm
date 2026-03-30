@@ -185,7 +185,17 @@ export class PlanStoreService {
       estimatedMinutes: task.estimatedMinutes,
       sortOrder: count + 1,
     });
-    return this.taskRepo.save(newTask);
+    const saved = await this.taskRepo.save(newTask);
+
+    // Синхронизируем план недели
+    const plan = await this.planRepo.findOne({ where: { id: planId } });
+    if (plan?.date) {
+      this.syncWeekCheckpoints(plan.date).catch((err) =>
+        this.logger.error('Week sync failed', err),
+      );
+    }
+
+    return saved;
   }
 
   /**
@@ -315,6 +325,11 @@ export class PlanStoreService {
       }
     }
 
+    // Синхронизируем план недели
+    this.syncWeekCheckpoints(date).catch((err) =>
+      this.logger.error('Week sync failed after saveDayPlan', err),
+    );
+
     return saved;
   }
 
@@ -364,14 +379,83 @@ export class PlanStoreService {
    * Обновить статус задачи по ID
    */
   async updateTaskStatus(taskId: string, status: string): Promise<TaskEntity | null> {
-    const task = await this.taskRepo.findOne({ where: { id: taskId } });
+    const task = await this.taskRepo.findOne({
+      where: { id: taskId },
+      relations: ['plan'],
+    });
     if (!task) return null;
 
     task.status = status as any;
     if (status === 'done') {
       task.completedAt = new Date();
     }
-    return this.taskRepo.save(task);
+    const saved = await this.taskRepo.save(task);
+
+    // Синхронизируем план недели
+    if (task.plan?.date) {
+      this.syncWeekCheckpoints(task.plan.date).catch((err) =>
+        this.logger.error('Week sync failed', err),
+      );
+    }
+
+    return saved;
+  }
+
+  /**
+   * Синхронизация: обновить checkpoints плана недели из реальных дневных планов
+   * Вызывается при любом изменении задач в дне
+   */
+  async syncWeekCheckpoints(date: string): Promise<void> {
+    const weekPlan = await this.getWeekPlan(date);
+    if (!weekPlan) return;
+
+    const start = weekPlan.date;
+    const end = weekPlan.dateEnd || start;
+
+    // Все дневные планы этой недели
+    const dayPlans = await this.planRepo.find({
+      where: {
+        type: PlanType.DAY,
+        date: Between(start, end),
+      },
+      relations: ['tasks'],
+      order: { date: 'ASC' },
+    });
+
+    const dayNames: Record<number, string> = {
+      0: 'Вс', 1: 'Пн', 2: 'Вт', 3: 'Ср', 4: 'Чт', 5: 'Пт', 6: 'Сб',
+    };
+
+    const checkpoints = weekPlan.checkpoints || {};
+
+    for (const dp of dayPlans) {
+      const d = new Date(dp.date + 'T12:00:00');
+      const dayShort = dayNames[d.getDay()];
+      if (!dayShort) continue;
+
+      const activeTasks = (dp.tasks || []).filter(
+        (t) => t.status !== 'cancelled',
+      );
+
+      if (activeTasks.length === 0 && !checkpoints[dayShort]) continue;
+
+      const existing = checkpoints[dayShort] || {};
+      const focus = (typeof existing === 'string')
+        ? existing
+        : (existing as any).focus || dp.focusTitle || '';
+
+      checkpoints[dayShort] = {
+        focus,
+        tasks: activeTasks.map((t) => {
+          const statusIcon = t.status === 'done' ? '✅ ' : '';
+          return `${statusIcon}${t.title}`;
+        }),
+      };
+    }
+
+    weekPlan.checkpoints = checkpoints;
+    await this.planRepo.save(weekPlan);
+    this.logger.log(`Week checkpoints synced for ${start}`);
   }
 
   /**

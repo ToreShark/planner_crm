@@ -48,7 +48,7 @@ export class PlanEntity {
   strategicIntentions?: string[];
 
   @Column({ type: 'jsonb', nullable: true })
-  checkpoints?: Record<string, string>;
+  checkpoints?: Record<string, any>;
 
   @Column({ type: 'jsonb', nullable: true })
   risks?: Array<{ risk: string; mitigation: string }>;

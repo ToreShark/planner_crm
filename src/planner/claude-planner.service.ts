@@ -230,22 +230,41 @@ ${options?.mainGoal ? `Главная цель: ${options.mainGoal}` : ''}
     currentPlan: DailyPlanOutput,
     reason: string,
   ): Promise<DailyPlanOutput> {
-    const completedIds = currentPlan.tasks
-      .filter((t) => t.status === 'done')
-      .map((t) => t.id);
+    // Фиксируем done и cancelled — они НЕ должны меняться при replan
+    const doneTasks = currentPlan.tasks.filter((t) => t.status === 'done');
+    const cancelledTasks = currentPlan.tasks.filter((t) => t.status === 'cancelled');
+    const activeTasks = currentPlan.tasks.filter(
+      (t) => t.status !== 'done' && t.status !== 'cancelled',
+    );
+
+    // Отправляем Claude ТОЛЬКО активные задачи — cancelled он вообще не видит
+    const planForClaude = {
+      ...currentPlan,
+      tasks: activeTasks,
+    };
+
+    const completedIds = doneTasks.map((t) => t.id);
 
     const userPrompt = `Текущий план дня нужно перепланировать.
 
 Причина: ${reason}
 
-Текущий план (JSON):
-${JSON.stringify(currentPlan, null, 2)}
+Текущий план (JSON, только АКТИВНЫЕ задачи — done и cancelled уже убраны):
+${JSON.stringify(planForClaude, null, 2)}
 
-Выполненные задачи: ${completedIds.join(', ') || 'пока ничего'}
+Выполненные задачи (НЕ включать в ответ, они уже закрыты): ${completedIds.join(', ') || 'пока ничего'}
 
 Перераспредели оставшиеся задачи на оставшееся время дня.
 Если что-то не влезает — пометь как deferred с пояснением.
-Верни обновленный DailyPlanOutput JSON.`;
+НЕ добавляй задачи, которых нет в списке.
+Верни обновленный DailyPlanOutput JSON (только активные задачи).`;
+
+    const replanResult = await this.callClaude<DailyPlanOutput>(userPrompt);
+
+    // Склеиваем обратно: done + cancelled + перепланированные активные
+    replanResult.tasks = [...doneTasks, ...cancelledTasks, ...replanResult.tasks];
+
+    return replanResult;
 
     return this.callClaude<DailyPlanOutput>(userPrompt);
   }
