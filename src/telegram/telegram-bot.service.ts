@@ -1779,11 +1779,12 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
   private async sendDayResults(ctx: Context, plan: PlanEntity) {
     const tasks = plan.tasks || [];
-    const done = tasks.filter((t) => t.status === 'done');
-    const deferred = tasks.filter((t) => t.status === 'deferred');
-    const cancelled = tasks.filter((t) => t.status === 'cancelled');
-    const pending = tasks.filter((t) => t.status === 'pending' || t.status === 'in_progress');
-    const pct = tasks.length > 0 ? Math.round((done.length / tasks.length) * 100) : 0;
+    // Cancelled задачи не учитываются в итогах — они удалены из планирования
+    const activeTasks = tasks.filter((t) => t.status !== 'cancelled');
+    const done = activeTasks.filter((t) => t.status === 'done');
+    const deferred = activeTasks.filter((t) => t.status === 'deferred');
+    const pending = activeTasks.filter((t) => t.status === 'pending' || t.status === 'in_progress');
+    const pct = activeTasks.length > 0 ? Math.round((done.length / activeTasks.length) * 100) : 0;
 
     const payments = plan.payments || [];
     const payReceived = payments.filter((p) => p.received);
@@ -1792,7 +1793,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     const lines: string[] = [];
     lines.push(`🌙 *Итоги дня — ${plan.date}*\n`);
     lines.push(`🎯 *Фокус:* ${plan.focusTitle}\n`);
-    lines.push(`${this.progressBar(pct)} *${pct}%* (${done.length}/${tasks.length})\n`);
+    lines.push(`${this.progressBar(pct)} *${pct}%* (${done.length}/${activeTasks.length})\n`);
 
     if (done.length > 0) {
       lines.push('✅ *Выполнено:*');
