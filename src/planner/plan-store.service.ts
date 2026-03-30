@@ -423,6 +423,42 @@ export class PlanStoreService {
   }
 
   /**
+   * Перенос незакрытых задач с yesterday на today
+   * Возвращает количество перенесённых задач
+   */
+  async carryOverTasks(fromDate: string, toDate: string): Promise<number> {
+    const fromPlan = await this.getDayPlan(fromDate);
+    if (!fromPlan) return 0;
+
+    const unclosed = (fromPlan.tasks || []).filter(
+      (t) => t.status === 'pending' || t.status === 'in_progress' || t.status === 'deferred',
+    );
+    if (unclosed.length === 0) return 0;
+
+    const toPlan = await this.getOrCreateDayPlan(toDate);
+    let added = 0;
+
+    for (const task of unclosed) {
+      const saved = await this.addTaskToPlan(toPlan.id, {
+        title: task.title,
+        description: task.description,
+        category: task.category,
+        priority: task.priority,
+        estimatedMinutes: task.estimatedMinutes,
+      });
+      if (saved) {
+        // Помечаем оригинал как deferred
+        task.status = 'deferred' as any;
+        task.deferredReason = `Перенесено на ${toDate}`;
+        await this.taskRepo.save(task);
+        added++;
+      }
+    }
+
+    return added;
+  }
+
+  /**
    * Синхронизация: обновить checkpoints плана недели из реальных дневных планов
    * Вызывается при любом изменении задач в дне
    */

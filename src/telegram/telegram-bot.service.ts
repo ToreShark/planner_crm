@@ -1170,6 +1170,18 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  async sendCarryOverNotification(count: number, fromDate: string) {
+    try {
+      await this.bot.telegram.sendMessage(
+        this.allowedUserId,
+        `🔄 *Перенос задач*\n\n${count} незакрытых задач с ${fromDate} перенесены на сегодня.\n\nИспользуй /today чтобы посмотреть обновлённый план.`,
+        { parse_mode: 'Markdown' },
+      );
+    } catch (error) {
+      this.logger.error('Carry-over notification failed', error);
+    }
+  }
+
   async sendEveningReview() {
     if (!this.currentPlan) return;
     try {

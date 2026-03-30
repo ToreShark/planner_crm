@@ -11,12 +11,45 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { TelegramBotService } from './telegram-bot.service';
+import { PlanStoreService } from '../planner/plan-store.service';
 
 @Injectable()
 export class PlannerCronService {
   private readonly logger = new Logger(PlannerCronService.name);
 
-  constructor(private readonly telegramBot: TelegramBotService) {}
+  constructor(
+    private readonly telegramBot: TelegramBotService,
+    private readonly planStore: PlanStoreService,
+  ) {}
+
+  /**
+   * Ночной перенос задач — 00:05 Алматы (19:05 UTC предыдущего дня)
+   * Незакрытые задачи за вчера → план на сегодня
+   */
+  @Cron('5 19 * * *', {
+    name: 'midnight-carryover',
+    timeZone: 'UTC',
+  })
+  async midnightCarryOver() {
+    this.logger.log('Midnight carry-over: checking unclosed tasks...');
+    try {
+      const now = new Date();
+      const today = now.toISOString().split('T')[0];
+      const yesterday = new Date(now);
+      yesterday.setDate(yesterday.getDate() - 1);
+      const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+      const count = await this.planStore.carryOverTasks(yesterdayStr, today);
+      if (count > 0) {
+        this.logger.log(`Carried over ${count} tasks from ${yesterdayStr} to ${today}`);
+        await this.telegramBot.sendCarryOverNotification(count, yesterdayStr);
+      } else {
+        this.logger.log('No tasks to carry over');
+      }
+    } catch (error) {
+      this.logger.error('Midnight carry-over failed', error);
+    }
+  }
 
   /**
    * Утренний план — 07:00 Алматы (02:00 UTC), Пн-Сб
