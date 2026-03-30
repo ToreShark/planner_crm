@@ -1463,24 +1463,67 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       const todayPlan = await this.planStore.getDayPlan(currentDate);
       const existingTasks = (todayPlan?.tasks || [])
         .filter((t) => t.status !== 'cancelled')
-        .map((t) => `[${t.status}] ${t.title}`);
+        .map((t) => `[${t.status}] [${t.suggestedTime || 'без времени'}] ${t.title}`);
 
       const parsed = await this.plannerService.analyzeUserMessage(
         text, currentDate, days[now.getDay()], existingTasks,
       );
 
-      // Если совпадает с существующей задачей и статус done — обновляем существующую
-      if (parsed.matchExistingTask && parsed.status === 'done' && todayPlan) {
-        const matchedTask = (todayPlan.tasks || []).find(
-          (t) => t.title.toLowerCase().includes(parsed.matchExistingTask!.toLowerCase().slice(0, 20))
-            || parsed.matchExistingTask!.toLowerCase().includes(t.title.toLowerCase().slice(0, 20)),
+      // === ACTION: UPDATE — обновление существующей задачи ===
+      if (parsed.action === 'update' && parsed.matchExistingTask) {
+        const matched = await this.planStore.findTaskByFuzzyTitle(
+          parsed.scheduledDate || currentDate,
+          parsed.matchExistingTask,
         );
-        if (matchedTask && matchedTask.status !== 'done') {
-          await this.planStore.updateTaskStatus(matchedTask.id, 'done');
+
+        if (matched) {
+          const updates = parsed.updates || {};
+          // Если Claude определил статус в updates
+          if (parsed.status === 'done' && !updates.status) updates.status = 'done';
+          if (parsed.status === 'cancelled' && !updates.status) updates.status = 'cancelled';
+
+          await this.planStore.updateTask(matched.id, updates);
+
+          // Обновляем currentPlan в памяти
+          if (this.currentPlan) {
+            const memTask = this.currentPlan.tasks.find((t) => t.id === matched.id);
+            if (memTask) {
+              if (updates.suggestedTime) memTask.suggestedTime = updates.suggestedTime;
+              if (updates.priority) memTask.priority = updates.priority as TaskPriority;
+              if (updates.title) memTask.title = updates.title;
+              if (updates.status) memTask.status = updates.status as TaskStatus;
+            }
+          }
+
+          // Формируем ответ
+          const lines: string[] = [];
+          lines.push(`✏️ *Обновлено:* ${matched.title}`);
+          if (updates.suggestedTime) lines.push(`🕐 Время: ${updates.suggestedTime}`);
+          if (updates.priority) lines.push(`${PRIORITY_EMOJI[updates.priority] || ''} Приоритет: ${updates.priority}`);
+          if (updates.title && updates.title !== matched.title) lines.push(`📝 → ${updates.title}`);
+          if (updates.status === 'done') lines.push(`✅ Помечено выполненным`);
+          if (updates.status === 'cancelled') lines.push(`❌ Отменено`);
+
+          await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
+          return;
+        }
+        // Если задачу не нашли — продолжаем как add/done
+      }
+
+      // === ACTION: DONE — выполненное действие ===
+      // Проверяем совпадение с существующей задачей
+      if (parsed.matchExistingTask && (parsed.action === 'done' || parsed.status === 'done') && todayPlan) {
+        const matched = await this.planStore.findTaskByFuzzyTitle(currentDate, parsed.matchExistingTask);
+        if (matched && matched.status !== 'done') {
+          await this.planStore.updateTaskStatus(matched.id, 'done');
+          if (this.currentPlan) {
+            const memTask = this.currentPlan.tasks.find((t) => t.id === matched.id);
+            if (memTask) memTask.status = TaskStatus.DONE;
+          }
         }
       }
 
-      // Сохраняем задачу в БД
+      // === ACTION: ADD / DONE (новая задача) ===
       const plan = await this.planStore.getOrCreateDayPlan(parsed.scheduledDate);
 
       const description = [
@@ -1498,7 +1541,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       });
 
       // Если задача уже выполнена — сразу ставим done
-      if (saved && parsed.status === 'done') {
+      if (saved && (parsed.status === 'done' || parsed.action === 'done')) {
         await this.planStore.updateTaskStatus(saved.id, 'done');
       }
 
@@ -1514,9 +1557,9 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       }
 
       // Обновляем currentPlan если есть
-      if (this.currentPlan && parsed.scheduledDate === currentDate) {
+      if (this.currentPlan && parsed.scheduledDate === currentDate && saved) {
         const newTask: TaskItem = {
-          id: saved?.id || `manual_${Date.now()}`,
+          id: saved.id,
           title: parsed.title,
           category: parsed.category as TaskCategory,
           priority: parsed.priority as TaskPriority,
@@ -1527,7 +1570,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
       // Формируем ответ
       const lines: string[] = [];
-      const isDone = parsed.status === 'done';
+      const isDone = parsed.status === 'done' || parsed.action === 'done';
 
       if (isDone) {
         lines.push(`✅ *Выполнено:* ${parsed.title}`);

@@ -526,6 +526,64 @@ export class PlanStoreService {
   }
 
   /**
+   * Обновить поля задачи (время, приоритет, title, статус)
+   */
+  async updateTask(taskId: string, updates: {
+    suggestedTime?: string;
+    priority?: string;
+    title?: string;
+    status?: string;
+  }): Promise<TaskEntity | null> {
+    const task = await this.taskRepo.findOne({
+      where: { id: taskId },
+      relations: ['plan'],
+    });
+    if (!task) return null;
+
+    if (updates.suggestedTime !== undefined) task.suggestedTime = updates.suggestedTime;
+    if (updates.priority) task.priority = updates.priority as any;
+    if (updates.title) task.title = updates.title;
+    if (updates.status) {
+      task.status = updates.status as any;
+      if (updates.status === 'done') task.completedAt = new Date();
+    }
+
+    const saved = await this.taskRepo.save(task);
+
+    if (task.plan?.date) {
+      this.syncWeekCheckpoints(task.plan.date).catch((err) =>
+        this.logger.error('Week sync failed', err),
+      );
+    }
+
+    return saved;
+  }
+
+  /**
+   * Найти задачу по нечёткому совпадению title в плане дня
+   */
+  async findTaskByFuzzyTitle(date: string, searchTitle: string): Promise<TaskEntity | null> {
+    const plan = await this.getDayPlan(date);
+    if (!plan) return null;
+
+    const normalized = searchTitle.trim().toLowerCase();
+    return (plan.tasks || []).find((t) => {
+      const taskTitle = t.title.trim().toLowerCase();
+      return taskTitle.includes(normalized)
+        || normalized.includes(taskTitle)
+        || this.fuzzyMatch(taskTitle, normalized);
+    }) || null;
+  }
+
+  private fuzzyMatch(a: string, b: string): boolean {
+    const wordsA = a.split(/\s+/).filter((w) => w.length > 3);
+    const wordsB = b.split(/\s+/).filter((w) => w.length > 3);
+    if (wordsA.length === 0 || wordsB.length === 0) return false;
+    const matches = wordsA.filter((wa) => wordsB.some((wb) => wb.includes(wa) || wa.includes(wb)));
+    return matches.length >= Math.min(2, wordsA.length);
+  }
+
+  /**
    * Все будущие задачи (после сегодня)
    */
   async getUpcomingTasks(): Promise<Array<{ date: string; focusTitle: string; tasks: TaskEntity[] }>> {
