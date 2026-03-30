@@ -167,11 +167,16 @@ export class PlanStoreService {
     priority: string;
     estimatedMinutes?: number;
   }): Promise<TaskEntity | null> {
-    // Дедупликация: проверяем есть ли похожая задача
-    const existing = await this.taskRepo.findOne({
-      where: { planId, title: task.title },
+    // Дедупликация: проверяем есть ли похожая задача (нечёткое сравнение)
+    const allTasks = await this.taskRepo.find({ where: { planId } });
+    const normalizedNew = task.title.trim().toLowerCase();
+    const duplicate = allTasks.find((t) => {
+      const normalizedExisting = t.title.trim().toLowerCase();
+      return normalizedExisting === normalizedNew
+        || normalizedExisting.includes(normalizedNew)
+        || normalizedNew.includes(normalizedExisting);
     });
-    if (existing) return null; // Дубль
+    if (duplicate) return null; // Дубль
 
     const count = await this.taskRepo.count({ where: { planId } });
 
@@ -291,10 +296,15 @@ export class PlanStoreService {
 
     const saved = await this.planRepo.save(existing);
 
-    // Сохраняем задачи
+    // Сохраняем задачи (с дедупликацией по title)
     if (plan.tasks?.length) {
-      for (let i = 0; i < plan.tasks.length; i++) {
-        const t = plan.tasks[i];
+      const seenTitles = new Set<string>();
+      let order = 0;
+      for (const t of plan.tasks) {
+        const normalizedTitle = t.title.trim().toLowerCase();
+        if (seenTitles.has(normalizedTitle)) continue; // Пропускаем дубль
+        seenTitles.add(normalizedTitle);
+        order++;
         const task = this.taskRepo.create({
           planId: saved.id,
           title: t.title,
@@ -304,7 +314,7 @@ export class PlanStoreService {
           status: t.status as any || 'pending',
           estimatedMinutes: t.estimatedMinutes,
           suggestedTime: t.suggestedTime,
-          sortOrder: i + 1,
+          sortOrder: order,
         });
         await this.taskRepo.save(task);
       }
