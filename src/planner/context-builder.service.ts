@@ -11,6 +11,7 @@ import {
   TaskCategory,
   WeeklyPlanInput,
   MonthlyPlanInput,
+  todayAlmaty,
 } from './types';
 import { PlanStoreService } from './plan-store.service';
 
@@ -37,7 +38,7 @@ export class ContextBuilderService {
     const now = new Date();
     const days = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
 
-    const todayStr = now.toISOString().split('T')[0];
+    const todayStr = todayAlmaty();
 
     const [activeCases, upcomingDeadlines, calendarEvents, weekPlan, monthPlan, stats, scheduledTasks, upcomingTasks, yesterdayCarryOver] =
       await Promise.all([

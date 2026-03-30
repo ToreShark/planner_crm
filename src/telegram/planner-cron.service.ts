@@ -12,6 +12,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { TelegramBotService } from './telegram-bot.service';
 import { PlanStoreService } from '../planner/plan-store.service';
+import { todayAlmaty, formatDateAlmaty } from '../planner/types';
 
 @Injectable()
 export class PlannerCronService {
@@ -33,11 +34,10 @@ export class PlannerCronService {
   async midnightCarryOver() {
     this.logger.log('Midnight carry-over: checking unclosed tasks...');
     try {
-      const now = new Date();
-      const today = now.toISOString().split('T')[0];
-      const yesterday = new Date(now);
+      const today = todayAlmaty();
+      const yesterday = new Date();
       yesterday.setDate(yesterday.getDate() - 1);
-      const yesterdayStr = yesterday.toISOString().split('T')[0];
+      const yesterdayStr = formatDateAlmaty(yesterday);
 
       const count = await this.planStore.carryOverTasks(yesterdayStr, today);
       if (count > 0) {

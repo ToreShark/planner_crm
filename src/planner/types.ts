@@ -3,6 +3,22 @@
 // Структуры данных планов (день/неделя/месяц)
 // ============================================================
 
+/**
+ * Получить текущую дату в Алматы (UTC+5) в формате YYYY-MM-DD
+ * ВАЖНО: new Date().toISOString() возвращает UTC, что на 5 часов отстаёт.
+ * В полночь по Алматы toISOString() ещё показывает вчерашнюю дату.
+ */
+export function todayAlmaty(): string {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Almaty' });
+}
+
+/**
+ * Форматировать любую дату в YYYY-MM-DD по таймзоне Алматы
+ */
+export function formatDateAlmaty(date: Date): string {
+  return date.toLocaleDateString('en-CA', { timeZone: 'Asia/Almaty' });
+}
+
 export enum PlanType {
   DAY = 'day',
   WEEK = 'week',

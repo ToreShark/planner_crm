@@ -7,7 +7,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between, LessThanOrEqual, MoreThanOrEqual } from 'typeorm';
 import { PlanEntity, TaskEntity, PaymentEntity, TimeBlockEntity } from './entities';
-import { PlanType, DailyPlanOutput } from './types';
+import { PlanType, DailyPlanOutput, todayAlmaty, formatDateAlmaty } from './types';
 
 @Injectable()
 export class PlanStoreService {
@@ -39,7 +39,7 @@ export class PlanStoreService {
    * Получить план недели, в которую попадает дата
    */
   async getWeekPlan(date?: string): Promise<PlanEntity | null> {
-    const targetDate = date || new Date().toISOString().split('T')[0];
+    const targetDate = date || todayAlmaty();
 
     // Ищем недельный план, где date <= targetDate <= dateEnd
     const plans = await this.planRepo.find({
@@ -55,7 +55,7 @@ export class PlanStoreService {
       // Расширяем на +1 день чтобы воскресенье попадало в неделю Пн-Сб
       const endPlus1 = new Date(end);
       endPlus1.setDate(endPlus1.getDate() + 1);
-      const endExtended = endPlus1.toISOString().split('T')[0];
+      const endExtended = formatDateAlmaty(endPlus1);
       if (targetDate >= start && targetDate <= endExtended) {
         return plan;
       }
@@ -69,7 +69,7 @@ export class PlanStoreService {
    * Получить план месяца
    */
   async getMonthPlan(date?: string): Promise<PlanEntity | null> {
-    const targetDate = date || new Date().toISOString().split('T')[0];
+    const targetDate = date || todayAlmaty();
     const monthStart = targetDate.slice(0, 7) + '-01';
 
     return this.planRepo.findOne({
@@ -116,7 +116,7 @@ export class PlanStoreService {
   }> {
     const cutoff = new Date();
     cutoff.setDate(cutoff.getDate() - days);
-    const cutoffStr = cutoff.toISOString().split('T')[0];
+    const cutoffStr = formatDateAlmaty(cutoff);
 
     const plans = await this.planRepo.find({
       where: {
@@ -221,7 +221,7 @@ export class PlanStoreService {
   async getYesterdayCarryOver(todayDate: string): Promise<TaskEntity[]> {
     const yesterday = new Date(todayDate);
     yesterday.setDate(yesterday.getDate() - 1);
-    const yesterdayStr = yesterday.toISOString().split('T')[0];
+    const yesterdayStr = formatDateAlmaty(yesterday);
 
     const plan = await this.getDayPlan(yesterdayStr);
     if (!plan) return [];
@@ -243,8 +243,8 @@ export class PlanStoreService {
     const sunday = new Date(monday);
     sunday.setDate(monday.getDate() + 6);
 
-    const startDate = monday.toISOString().split('T')[0];
-    const endDate = sunday.toISOString().split('T')[0];
+    const startDate = formatDateAlmaty(monday);
+    const endDate = formatDateAlmaty(sunday);
 
     // Проверяем нет ли уже плана на эту неделю
     const existing = await this.planRepo.findOne({
@@ -587,7 +587,7 @@ export class PlanStoreService {
    * Все будущие задачи (после сегодня)
    */
   async getUpcomingTasks(): Promise<Array<{ date: string; focusTitle: string; tasks: TaskEntity[] }>> {
-    const today = new Date().toISOString().split('T')[0];
+    const today = todayAlmaty();
 
     const plans = await this.planRepo.find({
       where: {

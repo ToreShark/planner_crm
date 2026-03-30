@@ -11,7 +11,7 @@ import { Telegraf, Markup, Context } from 'telegraf';
 import { InlineKeyboardButton } from 'telegraf/typings/core/types/typegram';
 import { ClaudePlannerService } from '../planner/claude-planner.service';
 import { PlanStoreService } from '../planner/plan-store.service';
-import { DailyPlanOutput, TaskItem, TaskCategory, TaskStatus, TaskPriority } from '../planner/types';
+import { DailyPlanOutput, TaskItem, TaskCategory, TaskStatus, TaskPriority, todayAlmaty, formatDateAlmaty } from '../planner/types';
 import { PlanEntity } from '../planner/entities';
 
 // Emoji маппинг
@@ -311,7 +311,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
 
     // /today — план на сегодня (память → БД → контрольная точка недели)
     this.bot.command('today', async (ctx) => {
-      const today = new Date().toISOString().split('T')[0];
+      const today = todayAlmaty();
 
       // Сначала проверяем план в памяти (сгенерированный Claude)
       if (this.currentPlan && this.currentPlan.date === today) {
@@ -360,7 +360,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     this.bot.command('tomorrow', async (ctx) => {
       const tmr = new Date();
       tmr.setDate(tmr.getDate() + 1);
-      const tomorrowStr = tmr.toISOString().split('T')[0];
+      const tomorrowStr = formatDateAlmaty(tmr);
 
       const plan = await this.planStore.getDayPlan(tomorrowStr);
 
@@ -462,7 +462,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     // /dayresults — итоги дня (сегодня или указанная дата)
     this.bot.command('dayresults', async (ctx) => {
       const dateArg = ctx.message.text.replace('/dayresults', '').trim();
-      const date = dateArg || new Date().toISOString().split('T')[0];
+      const date = dateArg || todayAlmaty();
       const plan = await this.planStore.getDayPlan(date);
 
       if (!plan) {
@@ -567,7 +567,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     this.bot.command('monthresults', async (ctx) => {
       const now = new Date();
       const monthStart = now.toISOString().slice(0, 7) + '-01';
-      const monthEnd = now.toISOString().split('T')[0];
+      const monthEnd = todayAlmaty();
 
       const dayPlans = await this.planStore.getDayPlans(monthStart, monthEnd);
       const weekPlan = await this.planStore.getWeekPlan();
@@ -1206,7 +1206,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   async sendSundayMessage() {
     try {
       const weekPlan = await this.planStore.getWeekPlan();
-      const today = new Date().toISOString().split('T')[0];
+      const today = todayAlmaty();
 
       const lines: string[] = [];
       lines.push('☀️ *Доброе утро! Сегодня воскресенье.*\n');
@@ -1457,7 +1457,7 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
     try {
       const now = new Date();
       const days = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
-      const currentDate = now.toISOString().split('T')[0];
+      const currentDate = todayAlmaty();
 
       // Собираем текущие задачи для контекста
       const todayPlan = await this.planStore.getDayPlan(currentDate);

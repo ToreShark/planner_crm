@@ -6,6 +6,7 @@
 import { Controller, Post, Body, Get, Param, Patch, Query, Logger } from '@nestjs/common';
 import { ClaudePlannerService } from './claude-planner.service';
 import { PlanStoreService } from './plan-store.service';
+import { todayAlmaty, formatDateAlmaty } from './types';
 import { DailyPlanOutput, PlanType } from './types';
 
 // --- DTOs ---
@@ -227,17 +228,18 @@ export class PlannerController {
   // =============================================================
 
   private resolveDate(input: string): string {
-    const now = new Date();
     if (input === 'today') {
-      return now.toISOString().split('T')[0];
+      return todayAlmaty();
     }
     if (input === 'tomorrow') {
-      now.setDate(now.getDate() + 1);
-      return now.toISOString().split('T')[0];
+      const tmr = new Date();
+      tmr.setDate(tmr.getDate() + 1);
+      return formatDateAlmaty(tmr);
     }
     if (input === 'yesterday') {
-      now.setDate(now.getDate() - 1);
-      return now.toISOString().split('T')[0];
+      const yest = new Date();
+      yest.setDate(yest.getDate() - 1);
+      return formatDateAlmaty(yest);
     }
     return input; // YYYY-MM-DD
   }
