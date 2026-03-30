@@ -1583,17 +1583,25 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   // -------------------------------------------------------
 
   private updateTaskStatus(taskId: string, status: TaskStatus) {
-    if (!this.currentPlan) return;
-    const task = this.currentPlan.tasks.find((t) => t.id === taskId);
-    if (task) task.status = status;
+    // Обновляем в памяти
+    if (this.currentPlan) {
+      const task = this.currentPlan.tasks.find((t) => t.id === taskId);
+      if (task) task.status = status;
+    }
+    // Обновляем в БД (+ синхронизация с планом недели)
+    this.planStore.updateTaskStatus(taskId, status).catch((err) =>
+      this.logger.error(`Failed to update task ${taskId} in DB`, err),
+    );
   }
 
   private async refreshPlanMessage(ctx: Context) {
     if (!this.currentPlan) return;
-    const tasks = this.currentPlan.tasks;
+    const tasks = this.currentPlan.tasks.filter(
+      (t) => t.status !== TaskStatus.CANCELLED,
+    );
     const done = tasks.filter((t) => t.status === TaskStatus.DONE).length;
     const total = tasks.length;
-    const pct = Math.round((done / total) * 100);
+    const pct = total > 0 ? Math.round((done / total) * 100) : 0;
     await ctx.reply(`${this.progressBar(pct)} ${pct}% (${done}/${total})`);
   }
 
@@ -2027,10 +2035,13 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       lines.push('');
     }
 
-    // Задачи
-    if (plan.tasks && plan.tasks.length > 0) {
+    // Задачи (без cancelled — они удалены из планирования)
+    const visibleTasks = (plan.tasks || [])
+      .filter((t) => t.status !== 'cancelled')
+      .sort((a, b) => a.sortOrder - b.sortOrder);
+    if (visibleTasks.length > 0) {
       lines.push('*Задачи:*');
-      for (const task of plan.tasks.sort((a, b) => a.sortOrder - b.sortOrder)) {
+      for (const task of visibleTasks) {
         const status = STATUS_EMOJI[task.status] || '⬜';
         const priority = PRIORITY_EMOJI[task.priority] || '';
         const cat = CATEGORY_EMOJI[task.category] || '';
@@ -2079,8 +2090,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
       lines.push(`\n💬 _${plan.comment}_`);
     }
 
-    // Восстанавливаем currentPlan из БД для кнопок и прогресса
-    const tasks = (plan.tasks || []).map((t) => ({
+    // Восстанавливаем currentPlan из БД для кнопок и прогресса (без cancelled)
+    const tasks = (plan.tasks || []).filter((t) => t.status !== 'cancelled').map((t) => ({
       id: t.id,
       title: t.title,
       description: t.description,
