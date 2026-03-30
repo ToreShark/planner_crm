@@ -39,7 +39,7 @@ export class ContextBuilderService {
 
     const todayStr = now.toISOString().split('T')[0];
 
-    const [activeCases, upcomingDeadlines, calendarEvents, weekPlan, monthPlan, stats, scheduledTasks, upcomingTasks] =
+    const [activeCases, upcomingDeadlines, calendarEvents, weekPlan, monthPlan, stats, scheduledTasks, upcomingTasks, yesterdayCarryOver] =
       await Promise.all([
         this.getActiveCases(),
         this.getUpcomingDeadlines(planType),
@@ -52,6 +52,9 @@ export class ContextBuilderService {
           : Promise.resolve([]),
         planType === PlanType.WEEK
           ? this.planStore.getUpcomingTasks()
+          : Promise.resolve([]),
+        planType === PlanType.DAY
+          ? this.planStore.getYesterdayCarryOver(todayStr)
           : Promise.resolve([]),
       ]);
 
@@ -71,6 +74,14 @@ export class ContextBuilderService {
         title: t.title,
         description: t.description,
         priority: t.priority,
+        status: t.status,
+      })),
+      yesterdayCarryOver: yesterdayCarryOver.map((t) => ({
+        title: t.title,
+        description: t.description,
+        priority: t.priority,
+        status: t.status,
+        category: t.category,
       })),
       upcomingTasks: upcomingTasks,
       recentCompletionRate: stats.completionRate,
@@ -294,7 +305,17 @@ export class ContextBuilderService {
       sections.push(`## Часто переносимые задачи: ${ctx.commonDeferrals.join(', ')}`);
     }
 
-    // Предзапланированные задачи на сегодня (ОБЯЗАТЕЛЬНО включить в план дня)
+    // Вчерашние незакрытые задачи (перенос)
+    if (ctx.yesterdayCarryOver && ctx.yesterdayCarryOver.length > 0) {
+      sections.push('## 🔄 НЕЗАКРЫТЫЕ ЗАДАЧИ СО ВЧЕРА (перенести в сегодняшний план):');
+      sections.push('Эти задачи не были выполнены вчера и НЕ отменены. Включи их в план.');
+      for (const t of ctx.yesterdayCarryOver) {
+        const line = `- [${t.priority.toUpperCase()}] [${t.status}] ${t.title}${t.description ? ` — ${t.description}` : ''}`;
+        sections.push(line);
+      }
+    }
+
+    // Предзапланированные задачи на сегодня (только активные — done/cancelled уже отфильтрованы)
     if (ctx.scheduledTasks && ctx.scheduledTasks.length > 0) {
       sections.push('## ⚡ ПРЕДЗАПЛАНИРОВАННЫЕ ЗАДАЧИ НА СЕГОДНЯ (ОБЯЗАТЕЛЬНО включить в план):');
       for (const t of ctx.scheduledTasks) {
@@ -314,7 +335,7 @@ export class ContextBuilderService {
         const dayName = dayNames[d.getDay()];
         sections.push(`\n### ${dayGroup.date} (${dayName}) — ${dayGroup.focusTitle}`);
         for (const t of dayGroup.tasks) {
-          let line = `- ⚡ [${dayName}] [${t.priority.toUpperCase()}] ${t.title}`;
+          let line = `- ⚡ [${dayName}] [${t.priority.toUpperCase()}] [${t.status}] ${t.title}`;
           if (t.description) line += ` — ${t.description}`;
           sections.push(line);
         }

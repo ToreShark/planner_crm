@@ -184,11 +184,21 @@ export interface PlannerContext {
   energyLevel?: number;
   place?: string;
 
-  // Предзапланированные задачи (из smart task)
+  // Предзапланированные задачи (из smart task, только активные)
   scheduledTasks?: Array<{
     title: string;
     description?: string;
     priority: string;
+    status: string;
+  }>;
+
+  // Незакрытые задачи со вчера (для переноса)
+  yesterdayCarryOver?: Array<{
+    title: string;
+    description?: string;
+    priority: string;
+    status: string;
+    category: string;
   }>;
 
   // Будущие задачи из БД (для плана недели)

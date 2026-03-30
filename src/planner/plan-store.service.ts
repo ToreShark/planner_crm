@@ -6,8 +6,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, Between, LessThanOrEqual, MoreThanOrEqual } from 'typeorm';
-import { PlanEntity, TaskEntity, PaymentEntity } from './entities';
-import { PlanType } from './types';
+import { PlanEntity, TaskEntity, PaymentEntity, TimeBlockEntity } from './entities';
+import { PlanType, DailyPlanOutput } from './types';
 
 @Injectable()
 export class PlanStoreService {
@@ -20,6 +20,8 @@ export class PlanStoreService {
     private readonly taskRepo: Repository<TaskEntity>,
     @InjectRepository(PaymentEntity)
     private readonly paymentRepo: Repository<PaymentEntity>,
+    @InjectRepository(TimeBlockEntity)
+    private readonly timeBlockRepo: Repository<TimeBlockEntity>,
   ) {}
 
   /**
@@ -187,12 +189,30 @@ export class PlanStoreService {
   }
 
   /**
-   * Получить запланированные задачи на дату
+   * Получить запланированные задачи на дату (только активные — без done/cancelled)
    */
   async getScheduledTasks(date: string): Promise<TaskEntity[]> {
     const plan = await this.getDayPlan(date);
     if (!plan) return [];
-    return plan.tasks || [];
+    return (plan.tasks || []).filter(
+      (t) => t.status !== 'done' && t.status !== 'cancelled',
+    );
+  }
+
+  /**
+   * Получить незакрытые задачи за вчера (pending, in_progress, deferred)
+   * Для переноса в сегодняшний план
+   */
+  async getYesterdayCarryOver(todayDate: string): Promise<TaskEntity[]> {
+    const yesterday = new Date(todayDate);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const yesterdayStr = yesterday.toISOString().split('T')[0];
+
+    const plan = await this.getDayPlan(yesterdayStr);
+    if (!plan) return [];
+    return (plan.tasks || []).filter(
+      (t) => t.status === 'pending' || t.status === 'in_progress' || t.status === 'deferred',
+    );
   }
 
   /**
@@ -229,6 +249,73 @@ export class PlanStoreService {
     entity.rawClaudeResponse = plan;
 
     return this.planRepo.save(entity);
+  }
+
+  /**
+   * Сохранить сгенерированный Claude план дня в БД
+   */
+  async saveDayPlan(plan: DailyPlanOutput): Promise<PlanEntity> {
+    const date = plan.date;
+
+    // Ищем существующий план (placeholder или предыдущий)
+    let existing = await this.planRepo.findOne({
+      where: { type: PlanType.DAY, date },
+      relations: ['tasks', 'timeBlocks'],
+    });
+
+    if (existing) {
+      // Удаляем старые timeBlocks и задачи через DELETE query (надёжнее чем remove)
+      await this.timeBlockRepo.delete({ planId: existing.id });
+      await this.taskRepo.delete({ planId: existing.id });
+    } else {
+      existing = this.planRepo.create({
+        type: PlanType.DAY,
+        date,
+      });
+    }
+
+    existing.focusTitle = plan.focusOfDay;
+    existing.intentions = plan.intentions || null;
+    existing.risks = plan.risks || [];
+    existing.rawClaudeResponse = plan as any;
+
+    const saved = await this.planRepo.save(existing);
+
+    // Сохраняем задачи
+    if (plan.tasks?.length) {
+      for (let i = 0; i < plan.tasks.length; i++) {
+        const t = plan.tasks[i];
+        const task = this.taskRepo.create({
+          planId: saved.id,
+          title: t.title,
+          description: t.description,
+          category: t.category as any,
+          priority: t.priority as any,
+          status: t.status as any || 'pending',
+          estimatedMinutes: t.estimatedMinutes,
+          suggestedTime: t.suggestedTime,
+          sortOrder: i + 1,
+        });
+        await this.taskRepo.save(task);
+      }
+    }
+
+    // Сохраняем timeBlocks
+    if (plan.timeBlocks?.length) {
+      for (const block of plan.timeBlocks) {
+        const tb = this.timeBlockRepo.create({
+          planId: saved.id,
+          startTime: block.startTime,
+          endTime: block.endTime,
+          label: block.label,
+          category: block.category as any,
+          taskIds: block.taskIds || [],
+        });
+        await this.timeBlockRepo.save(tb);
+      }
+    }
+
+    return saved;
   }
 
   /**
@@ -308,7 +395,10 @@ export class PlanStoreService {
       .map((p) => ({
         date: p.date,
         focusTitle: p.focusTitle,
-        tasks: p.tasks,
-      }));
+        tasks: p.tasks.filter(
+          (t) => t.status !== 'done' && t.status !== 'cancelled',
+        ),
+      }))
+      .filter((p) => p.tasks.length > 0);
   }
 }
