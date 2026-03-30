@@ -371,43 +371,77 @@ ${JSON.stringify(tasksContext, null, 2)}
   }
 
   // -------------------------------------------------------
-  // Умный парсинг задачи из текста
+  // Умный анализ любого текста от пользователя
   // -------------------------------------------------------
 
-  async parseSmartTask(rawText: string, currentDate: string, dayOfWeek: string): Promise<{
+  async analyzeUserMessage(rawText: string, currentDate: string, dayOfWeek: string, existingTasks?: string[]): Promise<{
     title: string;
     scheduledDate: string;
+    status: string;
     clientName?: string;
     phone?: string;
     caseContext?: string;
     priority: string;
     category: string;
     estimatedMinutes?: number;
+    payment?: {
+      clientName: string;
+      description: string;
+      amount: number;
+      currency: string;
+      received: boolean;
+    };
+    matchExistingTask?: string;
   }> {
-    const prompt = `Ты — парсер задач. Сегодня ${currentDate} (${dayOfWeek}).
+    const prompt = `Ты — AI-ассистент адвоката. Сегодня ${currentDate} (${dayOfWeek}).
 
 Пользователь написал:
 "${rawText}"
 
-Извлеки структурированную задачу. Разреши относительные даты:
-- "завтра" = следующий день
-- "в пятницу" / "в следующую пятницу" = ближайшая пятница от сегодня
-- "через неделю" = +7 дней
-- Если дата не указана — поставь сегодня.
+${existingTasks?.length ? `Текущие задачи в плане на сегодня:\n${existingTasks.map((t, i) => `${i + 1}. ${t}`).join('\n')}\n` : ''}
+
+## Твоя задача
+Проанализируй текст и определи:
+
+1. **Это ВЫПОЛНЕННОЕ действие или БУДУЩАЯ задача?**
+   Прошедшее время ("заключил", "отправил", "забрал", "оплатил", "заключен", "была оплата", "получил", "сдал") → status: "done"
+   Будущее/настоящее ("нужно", "надо", "составить", "позвонить", "записаться", "завтра") → status: "pending"
+
+2. **Есть ли оплата?** ("аванс", "оплата", "заплатил", "тыс", "тенге", "получил деньги") → заполни payment
+
+3. **Совпадает ли с существующей задачей?** Если текст описывает выполнение задачи из списка — верни её текст в matchExistingTask
+
+4. **Сформируй чистый короткий title** — действие + ключевой контекст. НЕ копируй весь текст.
+   Плохо: "сегодня заключен договор с +77782771481 с Уральска по судебному банкротству аванс 100 тыс остальная оплата когда будет подан иск в суд"
+   Хорошо: "Заключить договор — судебное банкротство (Уральск)"
+
+5. **Разреши даты:**
+   "сегодня" / нет даты → ${currentDate}
+   "завтра" → следующий день
+   "в пятницу" → ближайшая пятница
+   "через неделю" → +7 дней
 
 Верни СТРОГО JSON:
 {
-  "title": "Краткое название задачи (действие)",
+  "title": "Короткий чистый title задачи",
   "scheduledDate": "YYYY-MM-DD",
-  "clientName": "Имя клиента или null",
+  "status": "done|pending",
+  "clientName": "Имя/телефон клиента или null",
   "phone": "Телефон или null",
-  "caseContext": "Контекст дела (кратко) или null",
+  "caseContext": "Тип дела кратко или null",
   "priority": "critical|high|medium|low",
   "category": "work|tech|marketing|health|personal",
-  "estimatedMinutes": число_или_null
+  "estimatedMinutes": число_или_null,
+  "payment": {"clientName": "кто", "description": "за что", "amount": число_в_тенге, "currency": "KZT", "received": true} или null,
+  "matchExistingTask": "текст совпавшей задачи из списка или null"
 }`;
 
     return this.callClaude(prompt);
+  }
+
+  /** @deprecated Use analyzeUserMessage instead */
+  async parseSmartTask(rawText: string, currentDate: string, dayOfWeek: string) {
+    return this.analyzeUserMessage(rawText, currentDate, dayOfWeek);
   }
 
   // -------------------------------------------------------

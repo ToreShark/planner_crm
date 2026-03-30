@@ -810,14 +810,8 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         return;
       }
 
-      // Если текст длинный и содержит дату/время — smart task через Claude
-      if (this.isSmartTask(text)) {
-        await this.handleSmartTask(ctx, text);
-        return;
-      }
-
-      // Иначе — простое добавление как задачу на сегодня
-      await this.addTaskFromText(ctx, text);
+      // Любой текст → Claude анализирует и решает что делать
+      await this.handleSmartMessage(ctx, text);
     });
   }
 
@@ -1442,84 +1436,39 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
   }
 
   // -------------------------------------------------------
-  // Добавление задачи текстом
+  // Умная обработка любого текста через Claude
   // -------------------------------------------------------
 
-  private async addTaskFromText(ctx: Context, text: string) {
-    if (!this.currentPlan) {
-      // Сохраняем как задачу на сегодня в БД
-      const today = new Date().toISOString().split('T')[0];
-      const plan = await this.planStore.getOrCreateDayPlan(today);
-      const category = this.detectCategory(text);
-      const saved = await this.planStore.addTaskToPlan(plan.id, {
-        title: text,
-        category,
-        priority: 'medium',
-      });
-      if (!saved) {
-        await ctx.reply(`⚠️ Такая задача уже есть на сегодня.`);
-        return;
-      }
-      await ctx.reply(
-        `➕ Задача сохранена на *${today}*:\n${CATEGORY_EMOJI[category] || '📌'} ${text}\n\n_Используй /plan чтобы сгенерировать полный план дня._`,
-        { parse_mode: 'Markdown' },
-      );
-      return;
-    }
-
-    const timeMatch = text.match(/(\d{1,2}[:.]\d{2})/);
-    const suggestedTime = timeMatch ? timeMatch[1].replace('.', ':') : undefined;
-    const category = this.detectCategory(text);
-
-    const newTask: TaskItem = {
-      id: `manual_${Date.now()}`,
-      title: text.replace(/(\d{1,2}[:.]\d{2})/, '').trim(),
-      category,
-      priority: TaskPriority.MEDIUM,
-      status: TaskStatus.PENDING,
-      suggestedTime,
-    };
-
-    this.currentPlan.tasks.push(newTask);
-
-    await ctx.reply(
-      `➕ Добавлено: ${CATEGORY_EMOJI[category]} *${newTask.title}*` +
-        (suggestedTime ? `\n🕐 ${suggestedTime}` : ''),
-      {
-        parse_mode: 'Markdown',
-        ...Markup.inlineKeyboard([
-          [
-            Markup.button.callback('✅', `done:${newTask.id}`),
-            Markup.button.callback('➡️', `defer:${newTask.id}`),
-            Markup.button.callback('📋', `detail:${newTask.id}`),
-          ],
-        ]),
-      },
-    );
-  }
-
-  // -------------------------------------------------------
-  // Smart Task — Claude парсит текст → задача на будущую дату
-  // -------------------------------------------------------
-
-  private isSmartTask(text: string): boolean {
-    const lower = text.toLowerCase();
-    const hasDateWords = /завтра|послезавтра|понедельник|вторник|сред[уа]|четверг|пятниц|суббот|воскресень|следующ|через\s+\d|на\s+недел|\d{1,2}[\/.]\d{1,2}|\d{1,2}\s*(январ|феврал|март|апрел|ма[йя]|июн|июл|август|сентябр|октябр|ноябр|декабр)/.test(lower);
-    const isLongEnough = text.length > 20;
-    return hasDateWords && isLongEnough;
-  }
-
-  private async handleSmartTask(ctx: Context, text: string) {
-    await ctx.reply('🤖 Анализирую задачу...');
+  private async handleSmartMessage(ctx: Context, text: string) {
+    await ctx.reply('🤖 Анализирую...');
 
     try {
       const now = new Date();
       const days = ['Воскресенье', 'Понедельник', 'Вторник', 'Среда', 'Четверг', 'Пятница', 'Суббота'];
       const currentDate = now.toISOString().split('T')[0];
 
-      const parsed = await this.plannerService.parseSmartTask(text, currentDate, days[now.getDay()]);
+      // Собираем текущие задачи для контекста
+      const todayPlan = await this.planStore.getDayPlan(currentDate);
+      const existingTasks = (todayPlan?.tasks || [])
+        .filter((t) => t.status !== 'cancelled')
+        .map((t) => `[${t.status}] ${t.title}`);
 
-      // Сохраняем в БД
+      const parsed = await this.plannerService.analyzeUserMessage(
+        text, currentDate, days[now.getDay()], existingTasks,
+      );
+
+      // Если совпадает с существующей задачей и статус done — обновляем существующую
+      if (parsed.matchExistingTask && parsed.status === 'done' && todayPlan) {
+        const matchedTask = (todayPlan.tasks || []).find(
+          (t) => t.title.toLowerCase().includes(parsed.matchExistingTask!.toLowerCase().slice(0, 20))
+            || parsed.matchExistingTask!.toLowerCase().includes(t.title.toLowerCase().slice(0, 20)),
+        );
+        if (matchedTask && matchedTask.status !== 'done') {
+          await this.planStore.updateTaskStatus(matchedTask.id, 'done');
+        }
+      }
+
+      // Сохраняем задачу в БД
       const plan = await this.planStore.getOrCreateDayPlan(parsed.scheduledDate);
 
       const description = [
@@ -1536,39 +1485,61 @@ export class TelegramBotService implements OnModuleInit, OnModuleDestroy {
         estimatedMinutes: parsed.estimatedMinutes,
       });
 
-      if (!saved) {
-        await ctx.reply(`⚠️ Такая задача уже есть на *${parsed.scheduledDate}*: ${parsed.title}`, { parse_mode: 'Markdown' });
-        return;
+      // Если задача уже выполнена — сразу ставим done
+      if (saved && parsed.status === 'done') {
+        await this.planStore.updateTaskStatus(saved.id, 'done');
       }
 
-      // Формируем подтверждение
+      // Если есть оплата — сохраняем
+      if (parsed.payment && parsed.payment.amount > 0) {
+        await this.planStore.addPayment(plan.id, {
+          clientName: parsed.payment.clientName,
+          description: parsed.payment.description,
+          amount: parsed.payment.amount,
+          currency: parsed.payment.currency || 'KZT',
+          received: parsed.payment.received !== false,
+        });
+      }
+
+      // Обновляем currentPlan если есть
+      if (this.currentPlan && parsed.scheduledDate === currentDate) {
+        const newTask: TaskItem = {
+          id: saved?.id || `manual_${Date.now()}`,
+          title: parsed.title,
+          category: parsed.category as TaskCategory,
+          priority: parsed.priority as TaskPriority,
+          status: parsed.status === 'done' ? TaskStatus.DONE : TaskStatus.PENDING,
+        };
+        this.currentPlan.tasks.push(newTask);
+      }
+
+      // Формируем ответ
       const lines: string[] = [];
-      lines.push(`✅ *Задача запланирована на ${parsed.scheduledDate}*\n`);
-      lines.push(`📋 *${parsed.title}*`);
-      if (parsed.clientName) lines.push(`👤 Клиент: ${parsed.clientName}`);
+      const isDone = parsed.status === 'done';
+
+      if (isDone) {
+        lines.push(`✅ *Выполнено:* ${parsed.title}`);
+      } else {
+        lines.push(`📋 *Запланировано на ${parsed.scheduledDate}:* ${parsed.title}`);
+      }
+
+      if (parsed.clientName) lines.push(`👤 ${parsed.clientName}`);
       if (parsed.phone) lines.push(`📞 ${parsed.phone}`);
       if (parsed.caseContext) lines.push(`📁 ${parsed.caseContext}`);
-      lines.push(`\n${PRIORITY_EMOJI[parsed.priority] || '🟡'} Приоритет: ${parsed.priority}`);
-      lines.push(`${CATEGORY_EMOJI[parsed.category] || '📌'} Категория: ${parsed.category}`);
-      if (parsed.estimatedMinutes) lines.push(`⏱ ~${parsed.estimatedMinutes} мин`);
-      lines.push(`\n_В утреннем плане на ${parsed.scheduledDate} эта задача появится автоматически._`);
+
+      if (parsed.payment) {
+        lines.push(`💰 ${(parsed.payment.amount / 1000).toFixed(0)}K тенге — ${parsed.payment.description}`);
+      }
+
+      if (!isDone && parsed.scheduledDate !== currentDate) {
+        lines.push(`\n_Появится в плане на ${parsed.scheduledDate}._`);
+      }
 
       await ctx.reply(lines.join('\n'), { parse_mode: 'Markdown' });
     } catch (error) {
-      this.logger.error('Smart task parsing failed', error);
-      // Fallback — добавляем как обычную задачу на сегодня
-      await ctx.reply('⚠️ Не удалось распарсить. Добавляю как обычную задачу на сегодня.');
-      await this.addTaskFromText(ctx, text);
+      this.logger.error('Smart message analysis failed', error);
+      await ctx.reply('⚠️ Не удалось проанализировать. Попробуй переформулировать.');
     }
-  }
-
-  private detectCategory(text: string): TaskCategory {
-    const lower = text.toLowerCase();
-    if (/суд|дело|клиент|иск|жалоб|отзыв|кассац|банкротств|консультац/.test(lower)) return TaskCategory.WORK;
-    if (/код|бот|crm|кабинет|сервер|баг/.test(lower)) return TaskCategory.TECH;
-    if (/реклам|таргет|рилс|контент|youtube|съёмк|сторис|курс/.test(lower)) return TaskCategory.MARKETING;
-    if (/трениров|бассейн|зал|бег|плаван/.test(lower)) return TaskCategory.HEALTH;
-    return TaskCategory.PERSONAL;
   }
 
   // -------------------------------------------------------

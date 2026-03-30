@@ -402,6 +402,27 @@ export class PlanStoreService {
   }
 
   /**
+   * Добавить оплату к плану
+   */
+  async addPayment(planId: string, payment: {
+    clientName: string;
+    description: string;
+    amount: number;
+    currency: string;
+    received: boolean;
+  }): Promise<PaymentEntity> {
+    const entity = this.paymentRepo.create({
+      planId,
+      clientName: payment.clientName,
+      description: payment.description,
+      amount: payment.amount,
+      currency: payment.currency,
+      received: payment.received,
+    });
+    return this.paymentRepo.save(entity);
+  }
+
+  /**
    * Синхронизация: обновить checkpoints плана недели из реальных дневных планов
    * Вызывается при любом изменении задач в дне
    */
